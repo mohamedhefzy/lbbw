@@ -1,0 +1,687 @@
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   YOUR AZURE ENVIRONMENT                 │
+│                                                         │
+│  ┌──────────────┐    Azure VM Extension                 │
+│  │ Windows VMs  │ → CustomScriptExtension → Fluent Bit  │
+│  └──────────────┘         │                             │
+│                           │                             │
+│  ┌──────────────┐    Azure VM Extension                 │
+│  │  RHEL VMs    │ → CustomScript v2.1  → Fluent Bit     │
+│  └──────────────┘         │                             │
+│                           ▼                             │
+│  ┌──────────────┐    Helm DaemonSet     Splunk HEC      │
+│  │  AKS x20     │ → fluent-bit pod  ─────────────────▶  │
+│  └──────────────┘                      :8088            │
+└─────────────────────────────────────────────────────────┘
+```
+
+***
+
+## PRE-REQUISITE: Splunk HEC Setup (5 min)
+
+Do this **once** before any Terraform:
+
+```
+1. Login to Splunk UI
+2. Settings → Data Inputs → HTTP Event Collector
+3. Click "Global Settings" → Enable Token = ON → Save
+4. Click "New Token"
+   → Name:       azure-fluentbit
+   → Index:      Create two indexes:
+                 - vm-logs
+                 - aks-logs
+5. Save → Copy the token
+6. Note: https://<splunk-host>:8088/services/collector
+```
+
+***
+
+## FOLDER STRUCTURE (Final)
+
+```
+terraform/
+├── main.tf                          ← root orchestrator
+├── variables.tf                     ← root vars
+├── terraform.tfvars                 ← your values
+├── providers.tf                     ← azurerm + helm
+│
+└── modules/
+    ├── vm/                          ← YOUR EXISTING VM MODULE
+    │   └── main.tf                  ← add module call here
+    │
+    ├── aks/                         ← YOUR EXISTING AKS MODULE
+    │   └── main.tf                  ← add module call here
+    │
+    ├── fluentbit-vm/                ← NEW
+    │   ├── main.tf
+    │   ├── variables.tf
+    │   └── scripts/
+    │       ├── install-linux.sh
+    │       └── install-windows.ps1
+    │
+    └── fluentbit-aks/               ← NEW
+        ├── main.tf
+        └── variables.tf
+```
+
+***
+
+## SECTION 1: Windows VMs → Fluent Bit → Splunk
+
+### `modules/fluentbit-vm/scripts/install-windows.ps1`
+```powershell
+param(
+  [string]$SplunkHost,
+  [string]$SplunkPort  = "8088",
+  [string]$SplunkToken,
+  [string]$SplunkIndex = "vm-logs"
+)
+
+$ErrorActionPreference = "Stop"
+$InstallDir = "C:\fluent-bit"
+
+Write-Host "=== Installing Fluent Bit on Windows ==="
+
+# 1. Create directories
+New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+New-Item -ItemType Directory -Force -Path "C:\logs\siem" | Out-Null
+
+# 2. Download Fluent Bit
+$ZipUrl  = "https://packages.fluentbit.io/windows/fluent-bit-3.2.7-win64.zip"
+$ZipPath = "$InstallDir\fluent-bit.zip"
+Write-Host "Downloading Fluent Bit..."
+Invoke-WebRequest -Uri $ZipUrl -OutFile $ZipPath -UseBasicParsing
+Expand-Archive -Path $ZipPath -DestinationPath $InstallDir -Force
+$BinPath = "$InstallDir\fluent-bit-3.2.7-win64\bin\fluent-bit.exe"
+
+# 3. Write config
+$Config = @"
+[SERVICE]
+    Flush           5
+    Log_Level       info
+    Daemon          off
+    Parsers_File    $InstallDir\fluent-bit-3.2.7-win64\conf\parsers.conf
+
+[INPUT]
+    Name            tail
+    Tag             vm.filelogs
+    Path            C:\logs\siem\*.log,C:\inetpub\logs\LogFiles\*.log
+    DB              $InstallDir\tail_file.db
+    Skip_Long_Lines On
+    Refresh_Interval 5
+
+[INPUT]
+    Name            winlog
+    Tag             vm.winevents
+    Channels        Security,System,Application
+    Interval_Sec    5
+    DB              $InstallDir\winlog.db
+
+[FILTER]
+    Name            record_modifier
+    Match           *
+    Record          hostname  $env:COMPUTERNAME
+    Record          source    azure-vm-windows
+    Record          index     $SplunkIndex
+
+[OUTPUT]
+    Name            splunk
+    Match           *
+    Host            $SplunkHost
+    Port            $SplunkPort
+    Splunk_Token    $SplunkToken
+    Splunk_Send_Raw On
+    TLS             On
+    TLS.Verify      Off
+    compress        gzip
+    Retry_Limit     5
+"@
+$Config | Out-File -FilePath "$InstallDir\fluent-bit.conf" -Encoding UTF8
+
+# 4. Register as Windows Service
+$ExistingService = Get-Service -Name "FluentBit" -ErrorAction SilentlyContinue
+if ($ExistingService) {
+  Stop-Service -Name "FluentBit" -Force
+  sc.exe delete "FluentBit" | Out-Null
+  Start-Sleep -Seconds 2
+}
+
+New-Service `
+  -Name        "FluentBit" `
+  -BinaryPathName "`"$BinPath`" -c `"$InstallDir\fluent-bit.conf`"" `
+  -DisplayName "Fluent Bit Log Shipper" `
+  -StartupType  Automatic
+
+Start-Service -Name "FluentBit"
+Write-Host "=== Fluent Bit running as Windows Service -> Splunk HEC ==="
+```
+
+***
+
+### `modules/fluentbit-vm/scripts/install-linux.sh`
+```bash
+#!/bin/bash
+set -euo pipefail
+
+SPLUNK_HOST="$1"
+SPLUNK_PORT="${2:-8088}"
+SPLUNK_TOKEN="$3"
+SPLUNK_INDEX="${4:-vm-logs}"
+
+echo "=== Installing Fluent Bit on Linux/RHEL ==="
+
+# 1. Detect OS and install
+if [ -f /etc/redhat-release ]; then
+  echo "Detected RHEL/CentOS"
+  # Import GPG key
+  rpm --import https://packages.fluentbit.io/fluentbit.key
+
+  # Add repo
+  cat > /etc/yum.repos.d/fluent-bit.repo <<'REPO'
+[fluent-bit]
+name=Fluent Bit
+baseurl=https://packages.fluentbit.io/centos/$releasever/$basearch/
+enabled=1
+gpgcheck=1
+gpgkey=https://packages.fluentbit.io/fluentbit.key
+REPO
+
+  yum install -y fluent-bit
+else
+  echo "Detected Ubuntu/Debian"
+  curl -fsSL https://raw.githubusercontent.com/fluent/fluent-bit/master/install.sh | sh
+fi
+
+# 2. Create directories
+mkdir -p /etc/fluent-bit /var/lib/fluent-bit /var/log/siem
+
+# 3. Write config
+cat > /etc/fluent-bit/fluent-bit.conf <<CONF
+[SERVICE]
+    Flush           5
+    Log_Level       info
+    Daemon          off
+    Parsers_File    /etc/fluent-bit/parsers.conf
+
+[INPUT]
+    Name            tail
+    Tag             vm.applogs
+    Path            /var/log/siem/*.log,/var/log/app/*.log
+    DB              /var/lib/fluent-bit/tail_app.db
+    Mem_Buf_Limit   10MB
+    Skip_Long_Lines On
+    Refresh_Interval 5
+
+[INPUT]
+    Name            systemd
+    Tag             vm.syslog
+    DB              /var/lib/fluent-bit/systemd.db
+    Strip_Underscores On
+
+[INPUT]
+    Name            tail
+    Tag             vm.secure
+    Path            /var/log/secure,/var/log/auth.log
+    DB              /var/lib/fluent-bit/secure.db
+    Skip_Long_Lines On
+
+[FILTER]
+    Name            record_modifier
+    Match           *
+    Record          hostname  \${HOSTNAME}
+    Record          source    azure-vm-linux
+    Record          index     ${SPLUNK_INDEX}
+
+[OUTPUT]
+    Name            splunk
+    Match           *
+    Host            ${SPLUNK_HOST}
+    Port            ${SPLUNK_PORT}
+    Splunk_Token    ${SPLUNK_TOKEN}
+    Splunk_Send_Raw On
+    TLS             On
+    TLS.Verify      Off
+    compress        gzip
+    Retry_Limit     5
+CONF
+
+# 4. Enable and start
+systemctl enable fluent-bit
+systemctl restart fluent-bit
+echo "=== Fluent Bit running -> Splunk HEC ==="
+systemctl status fluent-bit --no-pager
+```
+
+***
+
+### `modules/fluentbit-vm/main.tf`
+```hcl
+# ══════════════════════════════════════════════════════════
+# FLUENT BIT VM MODULE
+# Supports: Windows VMs + Linux/RHEL VMs
+# Target:   Splunk HEC (direct, no Event Hubs)
+# ══════════════════════════════════════════════════════════
+
+terraform {
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 3.0"
+    }
+  }
+}
+
+# ── LINUX VMs (RHEL / Ubuntu) ──────────────────────────────
+# Publisher: Microsoft.Azure.Extensions
+# Type:      CustomScript v2.1
+resource "azurerm_virtual_machine_extension" "fluentbit_linux" {
+  for_each = var.linux_vm_ids
+
+  name                 = "fluentbit-linux"
+  virtual_machine_id   = each.value
+  publisher            = "Microsoft.Azure.Extensions"
+  type                 = "CustomScript"
+  type_handler_version = "2.1"
+
+  # Inline script: passes Splunk params as arguments
+  settings = jsonencode({
+    script = base64encode(file("${path.module}/scripts/install-linux.sh"))
+  })
+
+  protected_settings = jsonencode({
+    commandToExecute = "bash install-linux.sh '${var.splunk_hec_host}' '${var.splunk_hec_port}' '${var.splunk_hec_token}' '${var.splunk_index_vm}'"
+  })
+
+  tags = {
+    component = "log-shipper"
+    tool      = "fluent-bit"
+    os        = "linux"
+    target    = "splunk-hec"
+  }
+
+  lifecycle {
+    ignore_changes = [settings, protected_settings]
+  }
+}
+
+# ── WINDOWS VMs ────────────────────────────────────────────
+# Publisher: Microsoft.Compute
+# Type:      CustomScriptExtension v1.10
+resource "azurerm_virtual_machine_extension" "fluentbit_windows" {
+  for_each = var.windows_vm_ids
+
+  name                 = "fluentbit-windows"
+  virtual_machine_id   = each.value
+  publisher            = "Microsoft.Compute"
+  type                 = "CustomScriptExtension"
+  type_handler_version = "1.10"
+
+  settings = jsonencode({
+    fileUris = []
+  })
+
+  protected_settings = jsonencode({
+    commandToExecute = "powershell -ExecutionPolicy Unrestricted -EncodedCommand ${base64encode(
+      "param($h,$p,$t,$i) ${file("${path.module}/scripts/install-windows.ps1")}"
+    )} -SplunkHost '${var.splunk_hec_host}' -SplunkPort '${var.splunk_hec_port}' -SplunkToken '${var.splunk_hec_token}' -SplunkIndex '${var.splunk_index_vm}'"
+  })
+
+  tags = {
+    component = "log-shipper"
+    tool      = "fluent-bit"
+    os        = "windows"
+    target    = "splunk-hec"
+  }
+
+  lifecycle {
+    ignore_changes = [settings, protected_settings]
+  }
+}
+```
+
+### `modules/fluentbit-vm/variables.tf`
+```hcl
+variable "linux_vm_ids" {
+  description = "Map of Linux/RHEL VM name => VM resource ID"
+  type        = map(string)
+  default     = {}
+}
+
+variable "windows_vm_ids" {
+  description = "Map of Windows VM name => VM resource ID"
+  type        = map(string)
+  default     = {}
+}
+
+variable "splunk_hec_host" {
+  description = "Splunk HEC hostname (no https://)"
+  type        = string
+}
+
+variable "splunk_hec_port" {
+  description = "Splunk HEC port (default 8088)"
+  type        = number
+  default     = 8088
+}
+
+variable "splunk_hec_token" {
+  description = "Splunk HEC token"
+  type        = string
+  sensitive   = true
+}
+
+variable "splunk_index_vm" {
+  description = "Splunk index for VM logs"
+  type        = string
+  default     = "vm-logs"
+}
+```
+
+***
+
+## SECTION 2: AKS → Fluent Bit DaemonSet → Splunk
+
+### `modules/fluentbit-aks/main.tf`
+```hcl
+# ══════════════════════════════════════════════════════════
+# FLUENT BIT AKS MODULE
+# Deployment: Helm DaemonSet (one pod per node)
+# Target:     Splunk HEC (direct)
+# NOTE: Azure Extensions NOT supported on AKS nodes
+# ══════════════════════════════════════════════════════════
+
+terraform {
+  required_providers {
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.0"
+    }
+  }
+}
+
+resource "helm_release" "fluentbit" {
+  for_each = var.aks_clusters
+
+  name             = "fluent-bit"
+  repository       = "https://fluent.github.io/helm-charts"
+  chart            = "fluent-bit"
+  version          = var.fluent_bit_chart_version
+  namespace        = "logging"
+  create_namespace = true
+  atomic           = true       # rollback on failure
+  timeout          = 300
+
+  values = [yamlencode({
+
+    # ── SERVICE ──────────────────────────────
+    config = {
+      service = <<-EOF
+        [SERVICE]
+            Flush            5
+            Log_Level        info
+            Daemon           off
+            Parsers_File     /fluent-bit/etc/parsers.conf
+            HTTP_Server      On
+            HTTP_Listen      0.0.0.0
+            HTTP_Port        2020
+            storage.metrics  on
+      EOF
+
+      # ── INPUTS ───────────────────────────
+      inputs = <<-EOF
+        [INPUT]
+            Name              tail
+            Tag               kube.*
+            Path              /var/log/containers/*.log
+            multiline.parser  docker, cri
+            DB                /var/log/flb_kube.db
+            Mem_Buf_Limit     50MB
+            Skip_Long_Lines   On
+            Refresh_Interval  10
+            Ignore_Older      24h
+      EOF
+
+      # ── FILTERS ──────────────────────────
+      filters = <<-EOF
+        [FILTER]
+            Name                kubernetes
+            Match               kube.*
+            Kube_URL            https://kubernetes.default.svc:443
+            Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+            Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+            Merge_Log           On
+            Keep_Log            Off
+            K8S-Logging.Parser  On
+            K8S-Logging.Exclude On
+            Annotations         Off
+            Labels              On
+
+        [FILTER]
+            Name    record_modifier
+            Match   kube.*
+            Record  cluster  ${each.key}
+            Record  source   azure-aks
+            Record  index    ${var.splunk_index_aks}
+      EOF
+
+      # ── OUTPUT → SPLUNK HEC ───────────────
+      outputs = <<-EOF
+        [OUTPUT]
+            Name             splunk
+            Match            *
+            Host             ${var.splunk_hec_host}
+            Port             ${var.splunk_hec_port}
+            Splunk_Token     ${var.splunk_hec_token}
+            Splunk_Send_Raw  On
+            TLS              On
+            TLS.Verify       Off
+            compress         gzip
+            Retry_Limit      5
+            Workers          2
+      EOF
+    }
+
+    # ── RESOURCES PER POD ────────────────────
+    resources = {
+      requests = { cpu = "100m", memory = "128Mi" }
+      limits   = { cpu = "200m", memory = "256Mi" }
+    }
+
+    # ── TOLERATIONS (run on all nodes) ───────
+    tolerations = [
+      {
+        key      = "node-role.kubernetes.io/master"
+        operator = "Exists"
+        effect   = "NoSchedule"
+      },
+      {
+        key      = "node-role.kubernetes.io/control-plane"
+        operator = "Exists"
+        effect   = "NoSchedule"
+      }
+    ]
+
+    # ── HEALTH PROBES ────────────────────────
+    livenessProbe = {
+      httpGet             = { path = "/", port = 2020 }
+      initialDelaySeconds = 10
+      periodSeconds       = 30
+    }
+
+    readinessProbe = {
+      httpGet             = { path = "/api/v1/health", port = 2020 }
+      initialDelaySeconds = 10
+      periodSeconds       = 30
+    }
+
+    serviceAccount = { create = true }
+
+    # ── RBAC (read pod logs) ─────────────────
+    rbac = { create = true }
+  })]
+}
+```
+
+### `modules/fluentbit-aks/variables.tf`
+```hcl
+variable "aks_clusters" {
+  description = "Map of cluster name => kubeconfig"
+  type = map(object({
+    host                   = string
+    cluster_ca_certificate = string
+    token                  = string
+  }))
+}
+
+variable "splunk_hec_host"  { type = string }
+variable "splunk_hec_port"  { type = number; default = 8088 }
+variable "splunk_hec_token" { type = string; sensitive = true }
+
+variable "splunk_index_aks" {
+  type    = string
+  default = "aks-logs"
+}
+
+variable "fluent_bit_chart_version" {
+  type    = string
+  default = "0.46.7"
+}
+```
+
+***
+
+## SECTION 3: Inject Into Your Existing Terraform
+
+### In your existing `modules/vm/main.tf` — add at the bottom:
+```hcl
+# ── INJECT: Fluent Bit for Linux VMs ──────────────────────
+module "fluentbit_vm" {
+  source = "../fluentbit-vm"
+
+  linux_vm_ids = {
+    for vm in azurerm_linux_virtual_machine.vms :
+    vm.name => vm.id
+  }
+
+  windows_vm_ids = {
+    for vm in azurerm_windows_virtual_machine.vms :
+    vm.name => vm.id
+  }
+
+  splunk_hec_host  = var.splunk_hec_host
+  splunk_hec_port  = var.splunk_hec_port
+  splunk_hec_token = var.splunk_hec_token
+  splunk_index_vm  = "vm-logs"
+}
+```
+
+### In your existing `modules/aks/main.tf` — add at the bottom:
+```hcl
+# ── INJECT: Fluent Bit for AKS clusters ───────────────────
+data "azurerm_kubernetes_cluster" "clusters" {
+  for_each            = toset(var.cluster_names)
+  name                = each.value
+  resource_group_name = var.resource_group_name
+}
+
+module "fluentbit_aks" {
+  source = "../fluentbit-aks"
+
+  aks_clusters = {
+    for name, cluster in data.azurerm_kubernetes_cluster.clusters : name => {
+      host                   = cluster.kube_config[0].host
+      cluster_ca_certificate = base64decode(cluster.kube_config[0].cluster_ca_certificate)
+      token                  = cluster.kube_config[0].password
+    }
+  }
+
+  splunk_hec_host  = var.splunk_hec_host
+  splunk_hec_port  = var.splunk_hec_port
+  splunk_hec_token = var.splunk_hec_token
+  splunk_index_aks = "aks-logs"
+}
+```
+
+### Root `terraform.tfvars`
+```hcl
+# ── Splunk HEC credentials ─────────────────────────────────
+splunk_hec_host  = "splunk.yourcompany.com"
+splunk_hec_port  = 8088
+splunk_hec_token = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+```
+
+### Root `variables.tf` — add these:
+```hcl
+variable "splunk_hec_host"  { type = string }
+variable "splunk_hec_port"  { type = number; default = 8088 }
+variable "splunk_hec_token" { type = string; sensitive = true }
+```
+
+### `providers.tf`
+```hcl
+provider "azurerm" {
+  features {}
+}
+
+# One Helm provider per AKS cluster
+provider "helm" {
+  kubernetes {
+    host                   = data.azurerm_kubernetes_cluster.clusters["prod-01"].kube_config[0].host
+    cluster_ca_certificate = base64decode(data.azurerm_kubernetes_cluster.clusters["prod-01"].kube_config[0].cluster_ca_certificate)
+    token                  = data.azurerm_kubernetes_cluster.clusters["prod-01"].kube_config[0].password
+  }
+}
+```
+
+***
+
+## Deployment Steps (Exact Order)
+
+```bash
+# 1. Initialize
+terraform init
+
+# 2. Plan — review changes
+terraform plan -out=tfplan
+
+# 3. Apply
+terraform apply tfplan
+
+# 4. Verify Windows VMs
+# Check extension status in Azure Portal:
+# VM → Extensions + applications → fluentbit-windows = Succeeded
+
+# 5. Verify Linux/RHEL VMs
+# SSH into VM:
+sudo systemctl status fluent-bit
+sudo journalctl -u fluent-bit -f
+
+# 6. Verify AKS DaemonSet
+kubectl get ds -n logging fluent-bit
+kubectl get pods -n logging -o wide
+kubectl logs -n logging -l app.kubernetes.io/name=fluent-bit --tail=50
+
+# 7. Verify in Splunk
+# index=vm-logs  → Windows + Linux logs
+# index=aks-logs → container logs
+```
+
+***
+
+## Key Differences Summary
+
+| | **Linux/RHEL VM** | **Windows VM** | **AKS** |
+|--|--|--|--|
+| **Method** | Azure VM Extension | Azure VM Extension | Helm DaemonSet |
+| **Publisher** | `Microsoft.Azure.Extensions` | `Microsoft.Compute` | N/A |
+| **Type** | `CustomScript` | `CustomScriptExtension` | N/A |
+| **Version** | `2.1` | `1.10` | chart `0.46.7` |
+| **Install** | `yum install fluent-bit` | `.zip` + Windows Service | auto via Helm |
+| **Config** | `/etc/fluent-bit/` | `C:\fluent-bit\` | Helm ConfigMap |
+| **Log source** | `/var/log/siem/*.log` + systemd | `C:\logs\` + WinLog | `/var/log/containers/` |
+
+**Paste your skeleton** whenever ready — I'll inject directly into your exact files. [docs.fluentbit](https://docs.fluentbit.io/manual/data-pipeline/outputs/splunk)
