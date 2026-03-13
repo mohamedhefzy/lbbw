@@ -1,0 +1,266 @@
+Here are your two architecture diagrams and the full Confluence page content ready to copy-paste.
+
+***
+## VM Architecture Diagram
+## AKS Architecture Diagram
+---
+## Confluence Page 1: VM Log Shipping
+```
+Page Title: Log Shipping | VM → Fluent Bit → Splunk HEC
+Parent:     Platform Engineering / Observability / Log Shipping
+Labels:     fluent-bit, splunk, vm, windows, rhel, terraform
+```
+
+***
+### Overview
+This page documents the solution for shipping logs from Azure Virtual Machines (Windows and Linux/RHEL) directly to Splunk using **Fluent Bit** as the log shipper via the **Splunk HTTP Event Collector (HEC)**.
+
+| Property | Value |
+|----------|-------|
+| **Log Shipper** | Fluent Bit 3.2.7 |
+| **Deployment Method** | Azure VM Extension |
+| **Destination** | Splunk HEC `:8088` |
+| **Splunk Index** | `vm-logs` |
+| **Protocol** | HTTPS + TLS + gzip |
+| **Status** | ✅ Production |
+
+***
+### Architecture
+> *(Attach diagram_vm.png here)*
+
+```
+Windows VMs  →  Azure Extension (Microsoft.Compute / CustomScriptExtension v1.10)
+                      → Fluent Bit (Windows Service)
+                            → Splunk HEC :8088 (index=vm-logs)
+
+RHEL/Linux VMs → Azure Extension (Microsoft.Azure.Extensions / CustomScript v2.1)
+                      → Fluent Bit (systemd service)
+                            → Splunk HEC :8088 (index=vm-logs)
+```
+
+***
+### Azure Extension Details
+| OS | Publisher | Type | Version |
+|----|-----------|------|---------|
+| **Windows** | `Microsoft.Compute` | `CustomScriptExtension` | `1.10` |
+| **Linux / RHEL** | `Microsoft.Azure.Extensions` | `CustomScript` | `2.1` |
+
+> ⚠️ **Important:** Azure Extensions are OS-specific. Using the wrong publisher will cause the extension to fail silently.
+
+***
+### Log Sources Collected
+**Windows VMs:**
+| Source | Path / Channel | Fluent Bit Tag |
+|--------|---------------|----------------|
+| Application log files | `C:\logs\siem\*.log` | `vm.filelogs` |
+| IIS logs | `C:\inetpub\logs\*.log` | `vm.filelogs` |
+| Windows Event Log | `Security, System, Application` | `vm.winevents` |
+
+**Linux / RHEL VMs:**
+| Source | Path | Fluent Bit Tag |
+|--------|------|----------------|
+| SIEM/App logs | `/var/log/siem/*.log` | `vm.applogs` |
+| Systemd journal | systemd unit logs | `vm.syslog` |
+| Auth/Secure logs | `/var/log/secure` | `vm.secure` |
+
+***
+### Terraform Module Structure
+```
+modules/
+├── fluentbit-vm/
+│   ├── main.tf                   ← Extension resources (for_each)
+│   ├── variables.tf              ← Inputs: vm_ids, splunk_hec_*
+│   └── scripts/
+│       ├── install-linux.sh      ← RHEL/Ubuntu install + config
+│       └── install-windows.ps1   ← Windows install + service setup
+└── vm/
+    └── main.tf                   ← YOUR EXISTING MODULE (add module call)
+```
+
+**Scaling:** Uses `for_each` on `linux_vm_ids` and `windows_vm_ids` maps.
+Adding a new VM = add one line to `terraform.tfvars`. Zero code changes.
+
+***
+### Required Variables (`terraform.tfvars`)
+```hcl
+splunk_hec_host  = "splunk.yourcompany.com"
+splunk_hec_port  = 8088
+splunk_hec_token = "xxxx-xxxx-xxxx-xxxx"   # ← from Splunk UI
+
+linux_vm_ids = {
+  "vm-rhel-prod-01" = "/subscriptions/.../vm-rhel-prod-01"
+  "vm-rhel-prod-02" = "/subscriptions/.../vm-rhel-prod-02"
+}
+
+windows_vm_ids = {
+  "vm-win-prod-01" = "/subscriptions/.../vm-win-prod-01"
+}
+```
+
+***
+### Deployment Steps
+1. Enable Splunk HEC → `Settings → Data Inputs → HTTP Event Collector → New Token`
+2. Create index `vm-logs` in Splunk
+3. Add `splunk_hec_*` variables to `terraform.tfvars`
+4. Add module call to `modules/vm/main.tf`
+5. Run `terraform init && terraform plan && terraform apply`
+6. Verify: `VM → Extensions + applications → fluentbit-linux/windows = Succeeded`
+
+***
+### Verification Commands
+```bash
+# Linux/RHEL
+sudo systemctl status fluent-bit
+sudo journalctl -u fluent-bit -f
+
+# Windows (PowerShell)
+Get-Service FluentBit
+Get-EventLog -LogName Application -Source FluentBit -Newest 20
+
+# Splunk search
+index=vm-logs source=azure-vm-linux
+index=vm-logs source=azure-vm-windows
+```
+
+***
+### Troubleshooting
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Extension status = Failed | Wrong publisher for OS | Check publisher matches OS table above |
+| No logs in Splunk | HEC token wrong | Verify token in `terraform.tfvars` |
+| Extension already exists | Previous deploy | `terraform taint` the extension resource |
+| TLS error | Self-signed cert | Set `TLS.Verify Off` in Fluent Bit config |
+
+***
+***
+## Confluence Page 2: AKS Log Shipping
+```
+Page Title: Log Shipping | AKS → Fluent Bit → Splunk HEC
+Parent:     Platform Engineering / Observability / Log Shipping
+Labels:     fluent-bit, splunk, aks, kubernetes, helm, terraform
+```
+
+***
+### Overview
+This page documents the solution for shipping logs from Azure Kubernetes Service (AKS) clusters directly to Splunk using **Fluent Bit** deployed as a **Kubernetes DaemonSet** via Helm.
+
+| Property | Value |
+|----------|-------|
+| **Log Shipper** | Fluent Bit 3.2.7 |
+| **Deployment Method** | Helm DaemonSet (one pod per node) |
+| **Helm Chart** | `fluent/fluent-bit` v0.46.7 |
+| **Namespace** | `logging` |
+| **Destination** | Splunk HEC `:8088` |
+| **Splunk Index** | `aks-logs` |
+| **Clusters** | 20 AKS clusters |
+| **Status** | ✅ Production |
+
+> ⚠️ **Azure VM Extensions are NOT supported on AKS nodes.** AKS nodes are fully managed by Azure. Fluent Bit must be deployed via Helm DaemonSet only.
+
+***
+### Architecture
+> *(Attach diagram_aks.png here)*
+
+```
+AKS Cluster (x20)
+  └── Node 1 → Fluent Bit Pod (DaemonSet) ──┐
+  └── Node 2 → Fluent Bit Pod (DaemonSet) ──┤→ Splunk HEC :8088
+  └── Node N → Fluent Bit Pod (DaemonSet) ──┘  (index=aks-logs)
+       ↑
+  Helm values.yaml
+  (deployed by Terraform for_each)
+```
+
+***
+### Log Sources Collected
+| Source | Path | Tag | Notes |
+|--------|------|-----|-------|
+| All container logs | `/var/log/containers/*.log` | `kube.*` | stdout + stderr |
+| Kubernetes metadata | API Server | enriched | pod name, namespace, labels |
+
+**Enriched fields added per log entry:**
+- `cluster` — cluster name (injected per `for_each` iteration)
+- `source` — `azure-aks`
+- `index` — `aks-logs`
+- `kubernetes.pod_name`
+- `kubernetes.namespace_name`
+- `kubernetes.labels`
+
+***
+### Terraform Module Structure
+```
+modules/
+├── fluentbit-aks/
+│   ├── main.tf          ← helm_release resource (for_each over clusters)
+│   └── variables.tf     ← Inputs: aks_clusters map, splunk_hec_*
+└── aks/
+    └── main.tf          ← YOUR EXISTING MODULE (add data + module call)
+```
+
+**Scaling:** `for_each` over `aks_clusters` map.
+Adding a new cluster = it is auto-discovered from `data.azurerm_kubernetes_cluster`.
+
+***
+### Required Variables (`terraform.tfvars`)
+```hcl
+splunk_hec_host  = "splunk.yourcompany.com"
+splunk_hec_port  = 8088
+splunk_hec_token = "xxxx-xxxx-xxxx-xxxx"   # from Splunk UI
+
+cluster_names = [
+  "aks-prod-01",
+  "aks-prod-02",
+  # ... up to 20
+]
+```
+
+***
+### Deployment Steps
+1. Enable Splunk HEC → create token and index `aks-logs`
+2. Add `splunk_hec_*` variables to `terraform.tfvars`
+3. Add `data` block + module call to `modules/aks/main.tf`
+4. Add Helm provider to `providers.tf`
+5. Run `terraform init && terraform plan && terraform apply`
+6. Verify DaemonSet on each cluster
+
+***
+### Verification Commands
+```bash
+# Check DaemonSet is running on all nodes
+kubectl get ds -n logging fluent-bit
+
+# Check all pods are Running (should equal node count)
+kubectl get pods -n logging -o wide
+
+# Watch live logs from Fluent Bit
+kubectl logs -n logging -l app.kubernetes.io/name=fluent-bit -f
+
+# Health check endpoint
+kubectl port-forward -n logging ds/fluent-bit 2020:2020
+curl http://localhost:2020/api/v1/health
+
+# Generate test log
+kubectl run test-log --image=busybox --rm -it --restart=Never \
+  -- sh -c "for i in \$(seq 1 5); do echo 'splunk test log'; sleep 1; done"
+
+# Splunk search
+index=aks-logs source=azure-aks
+index=aks-logs cluster=aks-prod-01
+```
+
+***
+### Troubleshooting
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Pods not scheduled on all nodes | Missing toleration | Add master/control-plane toleration |
+| `Permission denied` on log files | RBAC missing | Ensure `rbac.create=true` in Helm values |
+| No logs in Splunk | HEC token wrong | Check `Splunk_Token` in Helm config |
+| OOMKilled pods | Memory limit too low | Increase `limits.memory` to `512Mi` |
+| Duplicate logs | Multiple DaemonSets | Check only one Fluent Bit release per cluster |
+
+***
+### Related Pages
+- 📄 Log Shipping | VM → Fluent Bit → Splunk HEC
+- 📄 Splunk HEC Token Management
+- 📄 AKS Cluster Terraform Module
+- 📄 Log Retention Policy
