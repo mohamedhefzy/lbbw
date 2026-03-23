@@ -1,0 +1,3 @@
+splunk_hec_host  = "splunk.yourcompany.com"
+splunk_hec_port  = 8088
+splunk_hec_token = "xxxx-xxxx-xxxx-xxxx"   # from your secret store / pipeline var
