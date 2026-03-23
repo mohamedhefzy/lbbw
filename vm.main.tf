@@ -708,3 +708,107 @@ resource "azurerm_role_assignment" "keyvault_access_windows" {
   role_definition_name = "Key Vault Secrets User"
   principal_id         = azurerm_windows_virtual_machine.windows-vm[each.key].identity[0].principal_id
 }
+####################################################################
+#################### F L U E N T   B I T ##########################
+####################################################################
+
+# ── LINUX: Install Fluent Bit via CustomScript Extension ───────────────────
+# Follows same pattern as: azurerm_virtual_machine_extension.linux_aad_login
+# Publisher: Microsoft.Azure.Extensions / CustomScript v2.1
+
+resource "azurerm_virtual_machine_extension" "fluentbit_linux" {
+  for_each             = var.vm.linux != null ? azurerm_linux_virtual_machine.linux-vm : {}
+  name                 = "fluentbit-linux"
+  virtual_machine_id   = each.value.id
+  publisher            = "Microsoft.Azure.Extensions"
+  type                 = "CustomScript"
+  type_handler_version = "2.1"
+
+  protected_settings = jsonencode({
+    commandToExecute = join(" && ", [
+      # 1. Add Fluent Bit repo for RHEL
+      "rpm --import https://packages.fluentbit.io/fluentbit.key 2>/dev/null || true",
+      "echo '[fluent-bit]' > /etc/yum.repos.d/fluent-bit.repo",
+      "echo 'name=Fluent Bit' >> /etc/yum.repos.d/fluent-bit.repo",
+      "echo 'baseurl=https://packages.fluentbit.io/centos/8/x86_64/' >> /etc/yum.repos.d/fluent-bit.repo",
+      "echo 'enabled=1' >> /etc/yum.repos.d/fluent-bit.repo",
+      "echo 'gpgcheck=1' >> /etc/yum.repos.d/fluent-bit.repo",
+      "echo 'gpgkey=https://packages.fluentbit.io/fluentbit.key' >> /etc/yum.repos.d/fluent-bit.repo",
+      # 2. Install
+      "yum install -y fluent-bit",
+      # 3. Create directories
+      "mkdir -p /etc/fluent-bit /var/lib/fluent-bit /var/log/siem",
+      # 4. Write config
+      "cat > /etc/fluent-bit/fluent-bit.conf << 'FBCONF'\n[SERVICE]\n    Flush           5\n    Log_Level       info\n    Daemon          off\n    Parsers_File    /etc/fluent-bit/parsers.conf\n[INPUT]\n    Name            tail\n    Tag             vm.applogs\n    Path            /var/log/siem/*.log,/var/log/app/*.log\n    DB              /var/lib/fluent-bit/tail_app.db\n    Mem_Buf_Limit   10MB\n    Skip_Long_Lines On\n[INPUT]\n    Name            systemd\n    Tag             vm.syslog\n    DB              /var/lib/fluent-bit/systemd.db\n[FILTER]\n    Name            record_modifier\n    Match           *\n    Record          source    azure-vm-linux\n    Record          env       ${var.infra_environment}\n    Record          app       ${var.app_name}\n[OUTPUT]\n    Name            splunk\n    Match           *\n    Host            ${var.splunk_hec_host}\n    Port            ${var.splunk_hec_port}\n    Splunk_Token    ${var.splunk_hec_token}\n    Splunk_Send_Raw On\n    TLS             On\n    TLS.Verify      Off\n    compress        gzip\n    Retry_Limit     5\nFBCONF",
+      # 5. Enable and start
+      "systemctl enable fluent-bit",
+      "systemctl restart fluent-bit"
+    ])
+  })
+
+  tags = var.tags
+
+  lifecycle {
+    ignore_changes = [
+      tags["AppName"],
+      tags["Availability"],
+      tags["Confidentiality"],
+      tags["CreationDateTime"],
+      tags["Creator"],
+      tags["Environment"],
+      tags["Integrity"],
+      tags["ITAB"],
+      tags["Owner"],
+      tags["PlatformId"],
+      tags["SubscriptionType"],
+      protected_settings        # prevent re-deploy on every plan
+    ]
+  }
+
+  depends_on = [azurerm_linux_virtual_machine.linux-vm]
+}
+
+# ── WINDOWS: Install Fluent Bit via CustomScriptExtension ──────────────────
+# Follows same pattern as: azurerm_virtual_machine_extension.winrm_custom_script
+# Publisher: Microsoft.Compute / CustomScriptExtension v1.10
+# NOTE: depends_on winrm_custom_script since only ONE CustomScriptExtension
+#       can run at a time on a Windows VM
+
+resource "azurerm_virtual_machine_extension" "fluentbit_windows" {
+  for_each             = var.vm.windows != null ? azurerm_windows_virtual_machine.windows-vm : {}
+  name                 = "fluentbit-windows"
+  virtual_machine_id   = each.value.id
+  publisher            = "Microsoft.Compute"
+  type                 = "CustomScriptExtension"
+  type_handler_version = "1.10"
+
+  protected_settings = jsonencode({
+    commandToExecute = "powershell -ExecutionPolicy Unrestricted -Command \"& { $installDir = 'C:\\fluent-bit'; New-Item -ItemType Directory -Force -Path $installDir | Out-Null; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://packages.fluentbit.io/windows/fluent-bit-3.2.7-win64.zip' -OutFile \"$installDir\\fb.zip\" -UseBasicParsing; Expand-Archive -Path \"$installDir\\fb.zip\" -DestinationPath $installDir -Force; $conf = @'`n[SERVICE]`n    Flush           5`n    Log_Level       info`n    Daemon          off`n[INPUT]`n    Name            winlog`n    Tag             vm.winevents`n    Channels        Security,System,Application`n    Interval_Sec    5`n    DB              C:\\fluent-bit\\winlog.db`n[INPUT]`n    Name            tail`n    Tag             vm.filelogs`n    Path            C:\\logs\\siem\\*.log`n    DB              C:\\fluent-bit\\tail.db`n    Skip_Long_Lines On`n[FILTER]`n    Name            record_modifier`n    Match           *`n    Record          source    azure-vm-windows`n    Record          env       ${var.infra_environment}`n    Record          app       ${var.app_name}`n[OUTPUT]`n    Name            splunk`n    Match           *`n    Host            ${var.splunk_hec_host}`n    Port            ${var.splunk_hec_port}`n    Splunk_Token    ${var.splunk_hec_token}`n    Splunk_Send_Raw On`n    TLS             On`n    TLS.Verify      Off`n    compress        gzip`n    Retry_Limit     5`n'@; $conf | Out-File -FilePath 'C:\\fluent-bit\\fluent-bit.conf' -Encoding UTF8; $binPath = (Get-ChildItem -Path $installDir -Filter 'fluent-bit.exe' -Recurse | Select-Object -First 1).FullName; $svc = Get-Service -Name 'FluentBit' -ErrorAction SilentlyContinue; if ($svc) { Stop-Service 'FluentBit' -Force; sc.exe delete 'FluentBit' | Out-Null; Start-Sleep 2 }; New-Service -Name 'FluentBit' -BinaryPathName \"`\"$binPath`\" -c `\"C:\\fluent-bit\\fluent-bit.conf`\"\" -DisplayName 'Fluent Bit Log Shipper' -StartupType Automatic; Start-Service 'FluentBit' }\""
+  })
+
+  tags = var.tags
+
+  lifecycle {
+    ignore_changes = [
+      tags["AppName"],
+      tags["Availability"],
+      tags["Confidentiality"],
+      tags["CreationDateTime"],
+      tags["Creator"],
+      tags["Environment"],
+      tags["Integrity"],
+      tags["ITAB"],
+      tags["Owner"],
+      tags["PlatformId"],
+      tags["SubscriptionType"],
+      protected_settings        # prevent re-deploy on every plan
+    ]
+  }
+
+  # IMPORTANT: winrm_custom_script must finish first — only 1 CustomScriptExtension
+  # can be active at a time on a Windows VM
+  depends_on = [
+    azurerm_virtual_machine_extension.winrm_custom_script,
+    time_sleep.wait_180_seconds_for_restart_before_aad_plugin
+  ]
+}
