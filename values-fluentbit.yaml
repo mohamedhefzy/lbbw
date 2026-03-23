@@ -1,0 +1,69 @@
+# values-fluentbit.yaml
+
+# --- Custom parameters for your platform team ---
+logShipper:
+  logLocation: "/var/log/containers/*.log"   # AC: parameterization of log location
+  securityOnly: true                         # optional flag to only forward security/audit logs
+
+eventHub:
+  namespace: "myehns.servicebus.windows.net:9093"
+  topic: "aks-logs"
+  connectionString: "Endpoint=sb://myehns.servicebus.windows.net/;SharedAccessKeyName=Send;SharedAccessKey=XXXX"
+
+# --- Fluent Bit chart settings ---
+daemonset:
+  enabled: true
+
+serviceAccount:
+  create: true
+  name: "fluent-bit"
+  annotations: {}
+  labels: {}
+
+rbac:
+  create: true
+
+# Fluent Bit low-level config – inputs / filters / outputs
+config:
+  inputs: |
+    [INPUT]
+        Name              tail
+        Tag               kube.*
+        Path              {{ .Values.logShipper.logLocation }}
+        Parser            docker
+        DB                /fluent-bit/tail/flb_kube.db
+        Mem_Buf_Limit     5MB
+        Skip_Long_Lines   On
+        Refresh_Interval  10
+
+  filters: |
+    [FILTER]
+        Name                kubernetes
+        Match               kube.*
+        Kube_URL            https://kubernetes.default.svc:443
+        Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+        Merge_Log           On
+        Keep_Log            Off
+
+    {{- if .Values.logShipper.securityOnly }}
+    [FILTER]
+        Name    grep
+        Match   kube.*
+        Regex   log    (?i)security|audit|auth
+    {{- end }}
+
+  outputs: |
+    # Use Kafka output to push to Azure Event Hubs (Kafka-compatible endpoint)[web:19][web:23]
+    [OUTPUT]
+        Name                          kafka
+        Match                         kube.*
+        Brokers                       {{ .Values.eventHub.namespace }}
+        Topics                        {{ .Values.eventHub.topic }}
+        rdkafka.security.protocol     SASL_SSL
+        rdkafka.sasl.mechanism        PLAIN
+        rdkafka.sasl.username         "$ConnectionString"
+        rdkafka.sasl.password         {{ .Values.eventHub.connectionString }}
+        rdkafka.request.required.acks 1
+        tls                           on
+        tls.verify                    on
