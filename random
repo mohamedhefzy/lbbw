@@ -21,3 +21,36 @@ variable "splunk_hec_token" {
   type        = string
   sensitive   = true
 }
+
+
+------------------------
+VM
+------------------------
+
+# ── ADD at the bottom of variables.tf ────────────────────────
+
+variable "splunk_hec_host" {
+  description = "Splunk HEC hostname (without https://)"
+  type        = string
+}
+
+variable "splunk_hec_port" {
+  description = "Splunk HEC port"
+  type        = number
+  default     = 8088
+}
+
+variable "splunk_hec_token" {
+  description = "Splunk HEC authentication token"
+  type        = string
+  sensitive   = true
+}
+
+---------------------------------------------------------------------
+ADD to your terraform.tfvars or pipeline variables
+
+splunk_hec_host  = "splunk.yourcompany.com"
+splunk_hec_port  = 8088
+splunk_hec_token = "xxxx-xxxx-xxxx-xxxx"
+
+
