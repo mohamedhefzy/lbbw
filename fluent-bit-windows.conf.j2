@@ -1,0 +1,40 @@
+[SERVICE]
+    Flush           5
+    Log_Level       info
+    Daemon          off
+
+# ── Read Windows Event Log ─────────────────────────
+[INPUT]
+    Name            winlog
+    Tag             vm.winevents
+    Channels        Security,System,Application
+    Interval_Sec    5
+    DB              C:\fluent-bit\winlog.db
+
+# ── Read log files ─────────────────────────────────
+[INPUT]
+    Name            tail
+    Tag             vm.filelogs
+    Path            C:\logs\siem\*.log
+    DB              C:\fluent-bit\tail.db
+    Skip_Long_Lines On
+
+# ── Add metadata ───────────────────────────────────
+[FILTER]
+    Name            record_modifier
+    Match           *
+    Record          source    azure-vm-windows
+    Record          env       production
+
+# ── Send to Splunk HEC ─────────────────────────────
+[OUTPUT]
+    Name            splunk
+    Match           *
+    Host            {{ splunk_hec_host }}
+    Port            {{ splunk_hec_port }}
+    Splunk_Token    {{ splunk_hec_token }}
+    Splunk_Send_Raw On
+    TLS             On
+    TLS.Verify      Off
+    compress        gzip
+    Retry_Limit     5

@@ -1,0 +1,67 @@
+---
+- name: Install and configure Fluent Bit on Linux/RHEL
+  hosts: all
+  become: true
+
+  vars:
+    splunk_hec_host: "{{ splunk_hec_host }}"
+    splunk_hec_port: "{{ splunk_hec_port | default('8088') }}"
+    splunk_hec_token: "{{ splunk_hec_token }}"
+    splunk_index: "vm-logs"
+
+  tasks:
+
+    # ── 1. Install Fluent Bit ──────────────────────────────────────
+    - name: Import Fluent Bit GPG key (RHEL/CentOS)
+      ansible.builtin.rpm_key:
+        key: https://packages.fluentbit.io/fluentbit.key
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Add Fluent Bit yum repository (RHEL/CentOS)
+      ansible.builtin.yum_repository:
+        name: fluent-bit
+        description: Fluent Bit
+        baseurl: "https://packages.fluentbit.io/centos/{{ ansible_distribution_major_version }}/$basearch/"
+        enabled: true
+        gpgcheck: true
+        gpgkey: https://packages.fluentbit.io/fluentbit.key
+      when: ansible_os_family == "RedHat"
+
+    - name: Install Fluent Bit (RHEL/CentOS)
+      ansible.builtin.yum:
+        name: fluent-bit
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    # ── 2. Create required directories ────────────────────────────
+    - name: Create Fluent Bit directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - /etc/fluent-bit
+        - /var/lib/fluent-bit
+        - /var/log/siem
+
+    # ── 3. Write Fluent Bit config from template ──────────────────
+    - name: Write Fluent Bit configuration
+      ansible.builtin.template:
+        src: fluent-bit-linux.conf.j2
+        dest: /etc/fluent-bit/fluent-bit.conf
+        mode: "0644"
+      notify: Restart Fluent Bit
+
+    # ── 4. Enable and start service ───────────────────────────────
+    - name: Enable and start Fluent Bit
+      ansible.builtin.systemd:
+        name: fluent-bit
+        enabled: true
+        state: started
+
+  handlers:
+    - name: Restart Fluent Bit
+      ansible.builtin.systemd:
+        name: fluent-bit
+        state: restarted

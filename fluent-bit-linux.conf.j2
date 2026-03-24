@@ -1,0 +1,41 @@
+[SERVICE]
+    Flush           5
+    Log_Level       info
+    Daemon          off
+    Parsers_File    /etc/fluent-bit/parsers.conf
+
+# ── Read application log files ─────────────────────
+[INPUT]
+    Name            tail
+    Tag             vm.applogs
+    Path            /var/log/siem/*.log,/var/log/app/*.log
+    DB              /var/lib/fluent-bit/tail_app.db
+    Mem_Buf_Limit   10MB
+    Skip_Long_Lines On
+
+# ── Read systemd (journald) ────────────────────────
+[INPUT]
+    Name            systemd
+    Tag             vm.syslog
+    DB              /var/lib/fluent-bit/systemd.db
+
+# ── Add metadata to every log record ──────────────
+[FILTER]
+    Name            record_modifier
+    Match           *
+    Record          hostname  ${HOSTNAME}
+    Record          source    azure-vm-linux
+    Record          env       production
+
+# ── Send to Splunk HEC ─────────────────────────────
+[OUTPUT]
+    Name            splunk
+    Match           *
+    Host            {{ splunk_hec_host }}
+    Port            {{ splunk_hec_port }}
+    Splunk_Token    {{ splunk_hec_token }}
+    Splunk_Send_Raw On
+    TLS             On
+    TLS.Verify      Off
+    compress        gzip
+    Retry_Limit     5

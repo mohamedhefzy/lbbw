@@ -1,0 +1,47 @@
+---
+- name: Install and configure Fluent Bit on Windows
+  hosts: all
+  gather_facts: true
+
+  vars:
+    splunk_hec_host: "{{ splunk_hec_host }}"
+    splunk_hec_port: "{{ splunk_hec_port | default('8088') }}"
+    splunk_hec_token: "{{ splunk_hec_token }}"
+    fluent_bit_version: "3.2.7"
+    install_dir: 'C:\fluent-bit'
+
+  tasks:
+
+    # ── 1. Create directory ────────────────────────────────────────
+    - name: Create Fluent Bit install directory
+      ansible.windows.win_file:
+        path: "{{ install_dir }}"
+        state: directory
+
+    # ── 2. Download Fluent Bit zip ─────────────────────────────────
+    - name: Download Fluent Bit for Windows
+      ansible.windows.win_get_url:
+        url: "https://packages.fluentbit.io/windows/fluent-bit-{{ fluent_bit_version }}-win64.zip"
+        dest: "{{ install_dir }}\\fluent-bit.zip"
+
+    # ── 3. Extract zip ─────────────────────────────────────────────
+    - name: Extract Fluent Bit
+      community.windows.win_unzip:
+        src: "{{ install_dir }}\\fluent-bit.zip"
+        dest: "{{ install_dir }}"
+        delete_archive: false
+
+    # ── 4. Write config from template ─────────────────────────────
+    - name: Write Fluent Bit config
+      ansible.windows.win_template:
+        src: fluent-bit-windows.conf.j2
+        dest: "{{ install_dir }}\\fluent-bit.conf"
+
+    # ── 5. Register as Windows Service ────────────────────────────
+    - name: Create Fluent Bit Windows Service
+      ansible.windows.win_service:
+        name: FluentBit
+        path: '"{{ install_dir }}\fluent-bit-{{ fluent_bit_version }}-win64\bin\fluent-bit.exe" -c "{{ install_dir }}\fluent-bit.conf"'
+        display_name: Fluent Bit Log Shipper
+        start_mode: auto
+        state: started
