@@ -1,0 +1,436 @@
+Now I have everything. I can see the **exact schema, style, and pattern** used. Here is a full breakdown of what I found and then the Fluent Bit files built to match it exactly.
+
+***
+
+## What I Found in the OneAgent Files
+
+| Pattern | OneAgent does it like this |
+|---------|---------------------------|
+| **Terraform resource type** | `ansible_playbook` — NOT `azurerm_virtual_machine_extension` |
+| **Provider** | `ansible/ansible` — declared inside the module's own `terraform {}` block |
+| **Loop** | `for_each = var.vm_linux_ips != null ? var.vm_linux_ips : {}` |
+| **Target** | `name = each.value` (the IP address) |
+| **Flags** | `replayable = true`, `verbosity = 2` |
+| **Secrets passed** | via `extra_vars = {}` block with inline comments grouping them |
+| **Playbook structure** | Minimal — just `name`, `hosts`, `remote_user`, `become`, `vars`, one `import_role` task |
+| **Linux connection** | SSH (`ansible_connection: ssh`) |
+| **Windows connection** | WinRM (`ansible_connection: winrm`, port `5986`, `credssp`) |
+| **Variables file** | Sections split with `################################` comment headers |
+
+***
+
+## FILE 1: `main.tf` (mirrors OneAgent `main.tf` exactly)
+
+```hcl
+# *must* be declared within the module since it is no official provider
+terraform {
+  required_providers {
+    ansible = {
+      source = "ansible/ansible"
+    }
+  }
+}
+
+resource "ansible_playbook" "deploy_fluentbit_linux" {
+  # referencing from module call (lz-template) point of view
+  for_each = var.vm_linux_ips != null ? var.vm_linux_ips : {}
+
+  playbook   = "../../azr-post-modules/vm-fluentbit/playbook_fluentbit_linux.yml"
+  name       = each.value
+  replayable = true
+  verbosity  = 2
+
+  extra_vars = {
+    # relevant for ansible ssh
+    ansible_username = var.ansible_username
+    ansible_password = var.vm_passwords_linux[each.key]
+
+    # relevant for downloading fluent-bit package from artifactory
+    artifactory_user  = var.artifactory_user
+    artifactory_token = var.artifactory_token
+    artifactory_url   = var.infra_environment == "e" ? "https://artifactory.lbbw.sko.de/artifactory/skywalker-packages-src/tools" : var.artifactory_url
+
+    # splunk hec connection details
+    splunk_hec_host  = var.splunk_hec_host
+    splunk_hec_port  = var.splunk_hec_port
+    splunk_hec_token = var.FLUENTBIT_SPLUNK_TOKEN
+    fluentbit_state  = var.TF_APPLY == "False" ? "absent" : "present"
+  }
+}
+
+resource "ansible_playbook" "deploy_fluentbit_windows" {
+  # referencing from module call (lz-template) point of view
+  for_each = var.vm_windows_ips != null ? var.vm_windows_ips : {}
+
+  playbook   = "../../azr-post-modules/vm-fluentbit/playbook_fluentbit_windows.yml"
+  name       = each.value
+  replayable = true
+  verbosity  = 2
+
+  extra_vars = {
+    # relevant for ansible winrm
+    ansible_username = var.ansible_username
+    ansible_password = var.vm_passwords_windows[each.key]
+
+    # relevant for downloading fluent-bit package from artifactory
+    artifactory_user  = var.artifactory_user
+    artifactory_token = var.artifactory_token
+    artifactory_url   = var.infra_environment == "e" ? "https://artifactory.lbbw.sko.de/artifactory/skywalker-packages-src/tools" : var.artifactory_url
+
+    # splunk hec connection details
+    splunk_hec_host  = var.splunk_hec_host
+    splunk_hec_port  = var.splunk_hec_port
+    splunk_hec_token = var.FLUENTBIT_SPLUNK_TOKEN
+    fluentbit_state  = var.TF_APPLY == "False" ? "absent" : "present"
+  }
+}
+```
+
+***
+
+## FILE 2: `variables.tf` (mirrors OneAgent `variables.tf` exactly)
+
+```hcl
+################################
+# Global Variables
+################################
+variable "is_old_tenant" {
+  description = ""
+  type        = bool
+}
+
+variable "infra_environment" {
+  description = "This variable defines the environment to be built. (Prod,Cert,Dev,Engineering)."
+  type        = string
+  validation {
+    condition = contains(
+      ["p", "c", "d", "e"],
+      var.infra_environment
+    )
+    error_message = "infra_environment is not valid."
+  }
+}
+
+################################
+# Module Specific Variables
+################################
+variable "vm_linux_ips" {
+  description = "Linux VM IPs"
+  type        = map(string)
+}
+
+variable "vm_passwords_linux" {
+  description = "Linux VM Password"
+  type        = map(string)
+  sensitive   = true
+}
+
+variable "vm_windows_ips" {
+  description = "Windows VM IPs"
+  type        = map(string)
+}
+
+variable "vm_passwords_windows" {
+  description = "Windows VM Password"
+  type        = map(string)
+  sensitive   = true
+}
+
+variable "ansible_username" {
+  description = "vm username for ansible to use"
+  type        = string
+}
+
+variable "artifactory_user" {
+  description = "artifactory user for downloading installer package"
+  type        = string
+}
+
+variable "artifactory_token" {
+  description = "artifactory Token for downloading installer package"
+  type        = string
+  sensitive   = true
+}
+
+variable "artifactory_url" {
+  description = "Installation package name (URL) in Artifactory"
+  type        = string
+  default     = "https://artifactory.lbbw.sko.de/artifactory/skywalker-packages-prod/tools"
+}
+
+variable "TF_APPLY" {
+  description = "Gets info if a Apply or Destroy is being run"
+  type        = string
+}
+
+################################
+# Fluent Bit Specific Variables
+################################
+variable "FLUENTBIT_SPLUNK_TOKEN" {
+  description = "Splunk HEC token for Fluent Bit log shipping"
+  type        = string
+  sensitive   = true
+}
+
+variable "splunk_hec_host" {
+  description = "Splunk HEC hostname (without https://)"
+  type        = string
+}
+
+variable "splunk_hec_port" {
+  description = "Splunk HEC port"
+  type        = number
+  default     = 8088
+}
+```
+
+***
+
+## FILE 3: `playbook_fluentbit_linux.yml` (mirrors `playbook_oneagent_linux.yaml` exactly)
+
+```yaml
+---
+- name: >
+    Basic Fluent Bit installation using a package from Artifactory.
+    Main node communicates with Linux hosts over SSH.
+  hosts: all
+  remote_user: "{{ ansible_username }}"
+  become: yes
+  vars:
+    ansible_shell_type: sh
+    ansible_connection: ssh
+  tasks:
+    - name: Import Fluent Bit role
+      ansible.builtin.import_role:
+        name: "./fluent-bit/roles/fluentbit"
+```
+
+***
+
+## FILE 4: `playbook_fluentbit_windows.yml` (mirrors `playbook_oneagent_windows.yml` exactly)
+
+```yaml
+---
+- name: >
+    Basic Fluent Bit installation using a package from Artifactory.
+    Main node communicates with Windows hosts over WINRM.
+  hosts: all
+  remote_user: "{{ ansible_username }}"
+  become_method: runas
+  vars:
+    ansible_connection: winrm
+    ansible_port: 5986
+    ansible_winrm_transport: credssp
+    ansible_winrm_server_cert_validation: ignore
+  tasks:
+    - name: Import Fluent Bit role
+      ansible.builtin.import_role:
+        name: "./fluent-bit/roles/fluentbit"
+```
+
+***
+
+## FILE 5: Ansible Role — `fluent-bit/roles/fluentbit/tasks/main.yml`
+
+This is the actual install logic — the role that both playbooks call via `import_role`:
+
+```yaml
+---
+# ── Linux / RHEL ──────────────────────────────────────────────────────────────
+- name: Add Fluent Bit GPG key (Linux)
+  ansible.builtin.rpm_key:
+    key: "{{ artifactory_url }}/fluent-bit/fluentbit.key"
+    state: present
+  when: ansible_system == "Linux"
+
+- name: Add Fluent Bit yum repository (Linux)
+  ansible.builtin.yum_repository:
+    name: fluent-bit
+    description: Fluent Bit
+    baseurl: "{{ artifactory_url }}/fluent-bit/centos/$releasever/$basearch/"
+    enabled: true
+    gpgcheck: true
+    gpgkey: "{{ artifactory_url }}/fluent-bit/fluentbit.key"
+  when: ansible_system == "Linux"
+
+- name: Install Fluent Bit (Linux)
+  ansible.builtin.yum:
+    name: fluent-bit
+    state: "{{ fluentbit_state }}"
+  when: ansible_system == "Linux"
+
+- name: Create Fluent Bit config directory (Linux)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /etc/fluent-bit
+    - /var/lib/fluent-bit
+    - /var/log/siem
+  when: ansible_system == "Linux"
+
+- name: Write Fluent Bit config (Linux)
+  ansible.builtin.template:
+    src: fluent-bit-linux.conf.j2
+    dest: /etc/fluent-bit/fluent-bit.conf
+    mode: "0644"
+  notify: Restart Fluent Bit Linux
+  when: ansible_system == "Linux"
+
+- name: Enable and start Fluent Bit service (Linux)
+  ansible.builtin.systemd:
+    name: fluent-bit
+    enabled: true
+    state: started
+  when: ansible_system == "Linux" and fluentbit_state == "present"
+
+# ── Windows ───────────────────────────────────────────────────────────────────
+- name: Create Fluent Bit install directory (Windows)
+  ansible.windows.win_file:
+    path: 'C:\fluent-bit'
+    state: directory
+  when: ansible_system == "Win32NT"
+
+- name: Download Fluent Bit package from Artifactory (Windows)
+  ansible.windows.win_get_url:
+    url: "{{ artifactory_url }}/fluent-bit/fluent-bit-3.2.7-win64.zip"
+    dest: 'C:\fluent-bit\fluent-bit.zip'
+  when: ansible_system == "Win32NT"
+
+- name: Extract Fluent Bit (Windows)
+  community.windows.win_unzip:
+    src: 'C:\fluent-bit\fluent-bit.zip'
+    dest: 'C:\fluent-bit'
+    delete_archive: false
+  when: ansible_system == "Win32NT"
+
+- name: Write Fluent Bit config (Windows)
+  ansible.windows.win_template:
+    src: fluent-bit-windows.conf.j2
+    dest: 'C:\fluent-bit\fluent-bit.conf'
+  notify: Restart Fluent Bit Windows
+  when: ansible_system == "Win32NT"
+
+- name: Register Fluent Bit as Windows Service
+  ansible.windows.win_service:
+    name: FluentBit
+    path: '"C:\fluent-bit\fluent-bit-3.2.7-win64\bin\fluent-bit.exe" -c "C:\fluent-bit\fluent-bit.conf"'
+    display_name: Fluent Bit Log Shipper
+    start_mode: auto
+    state: "{{ fluentbit_state == 'present' | ternary('started', 'stopped') }}"
+  when: ansible_system == "Win32NT"
+```
+
+***
+
+## FILE 6: Config Templates
+
+**`fluent-bit/roles/fluentbit/templates/fluent-bit-linux.conf.j2`**
+```ini
+[SERVICE]
+    Flush           5
+    Log_Level       info
+    Daemon          off
+    Parsers_File    /etc/fluent-bit/parsers.conf
+
+[INPUT]
+    Name            tail
+    Tag             vm.applogs
+    Path            /var/log/siem/*.log,/var/log/app/*.log
+    DB              /var/lib/fluent-bit/tail_app.db
+    Mem_Buf_Limit   10MB
+    Skip_Long_Lines On
+
+[INPUT]
+    Name            systemd
+    Tag             vm.syslog
+    DB              /var/lib/fluent-bit/systemd.db
+
+[FILTER]
+    Name            record_modifier
+    Match           *
+    Record          source    azure-vm-linux
+    Record          env       {{ infra_environment }}
+
+[OUTPUT]
+    Name            splunk
+    Match           *
+    Host            {{ splunk_hec_host }}
+    Port            {{ splunk_hec_port }}
+    Splunk_Token    {{ splunk_hec_token }}
+    Splunk_Send_Raw On
+    TLS             On
+    TLS.Verify      Off
+    compress        gzip
+    Retry_Limit     5
+```
+
+**`fluent-bit/roles/fluentbit/templates/fluent-bit-windows.conf.j2`**
+```ini
+[SERVICE]
+    Flush           5
+    Log_Level       info
+    Daemon          off
+
+[INPUT]
+    Name            winlog
+    Tag             vm.winevents
+    Channels        Security,System,Application
+    Interval_Sec    5
+    DB              C:\fluent-bit\winlog.db
+
+[INPUT]
+    Name            tail
+    Tag             vm.filelogs
+    Path            C:\logs\siem\*.log
+    DB              C:\fluent-bit\tail.db
+    Skip_Long_Lines On
+
+[FILTER]
+    Name            record_modifier
+    Match           *
+    Record          source    azure-vm-windows
+    Record          env       {{ infra_environment }}
+
+[OUTPUT]
+    Name            splunk
+    Match           *
+    Host            {{ splunk_hec_host }}
+    Port            {{ splunk_hec_port }}
+    Splunk_Token    {{ splunk_hec_token }}
+    Splunk_Send_Raw On
+    TLS             On
+    TLS.Verify      Off
+    compress        gzip
+    Retry_Limit     5
+```
+
+***
+
+## Final Folder Structure (mirrors OneAgent structure)
+
+```
+azr-post-modules/
+├── vm-oneagent/                         ← EXISTING
+│   ├── main.tf
+│   ├── variables.tf
+│   ├── playbook_oneagent_linux.yml
+│   └── playbook_oneagent_windows.yml
+│
+└── vm-fluentbit/                        ← NEW (same structure)
+    ├── main.tf                          ← ansible_playbook resources
+    ├── variables.tf                     ← same sections + 3 new Splunk vars
+    ├── playbook_fluentbit_linux.yml     ← mirrors oneagent linux playbook
+    ├── playbook_fluentbit_windows.yml   ← mirrors oneagent windows playbook
+    └── fluent-bit/
+        └── roles/
+            └── fluentbit/
+                ├── tasks/
+                │   └── main.yml         ← actual install logic
+                └── templates/
+                    ├── fluent-bit-linux.conf.j2
+                    └── fluent-bit-windows.conf.j2
+```
+
+Every file follows the **exact same schema, comment style, variable naming, and structure** as the OneAgent module. [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/59108140/98d88b15-1c80-4516-af1f-456105c4d6db/playbook_oneagent_windows.yml?AWSAccessKeyId=ASIA2F3EMEYE7SQYRT54&Signature=JnVVc6R6rinwfquqL60WmcxwOY4%3D&x-amz-security-token=IQoJb3JpZ2luX2VjEOX%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLWVhc3QtMSJGMEQCIQCr20XgeJon65XY3LAy0QMCgLrANyAYdmoByLCV2eZyngIfQbxI55bb5Wummo16BW2EjgYJreFT5nWF62uIu6YzNSr8BAiu%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAEaDDY5OTc1MzMwOTcwNSIM3agvrkArqBRJN0YJKtAEHsFFe7GWWEMAc4%2BICQUny9EqpV5jTDjN20qGC%2FUVcECoLWIYLaDkhxwE6H7Zl2JhGZrTUOunyi8BtxQESDvWAaPyNCSjijKRVZdRy9%2B3An63bjuYCy5uC2GMTaMd2PmKenkHgmxA7vlqU6ykcPRVKuh8Z4akntcF%2BNHxsSl7IBeDf8uGOqySwcwddK8W7AaF642TN3OabWejVHZwz%2Brg8ddymsLUXB2agZALMzw9kxU79IXoexTxFIh8ovoNnjM3iEOpv4SNjDbJRJXnbAsbeTYKoOa0t2amfE2FoFLx1w9j3Rwm%2B35fygjyO2lQWn%2F68xeu%2BwiVUSLoF8eC9xls0%2F%2FlxTzcjCTGPeM%2Bi5MQl8bnm%2FG0FgiG8fHKP%2BX%2BGe6Dn%2BJ5y%2FbQvT3jhiDitG7Cw0CknPTCDgCl9e%2FA%2BaUxF0o0JXb78VPQQG0OU02scUZfK6OUkfghxtyquTp9CjPh0z7vRkktJZlwe0GsSTuV1CA3wwgRfWx6gFC6BUE03gWaGbgJ7FrCTAPhFBE67uX5BPTfRTupTOv1qBoJ91%2B2oGXK%2BMC7IU2Ex5WBJEy09vCiZNxPZXoCegs3lLYlLE5FXLeFbYg%2BOkiMkhMOaLof%2FmXwBTv1cTWwm6xEpnuFHpeWz1q57BmnSW7enp0Zd1W%2BOZSwOIeLsfd299nSLql3l8saC0gzSdZtYthXbNmTknd3PLzcX8Fm1Oq%2BZOZl1yp%2FoBwf%2Bq%2Fw4Xa6l%2FcTx4Q%2BZVtdLNhQaftAW78FobpkWuC8sIbo1za85neXiVtg4%2B5eXjChro%2FOBjqZAVFj9d6%2BrS3bVHUyYNX78TNd17DUIphcwjoGkZyiBmBYjgqj0GdeVyUAAHtiQTJbZXP5pn7r7eNdG%2B%2BYQwL61nJtoDCd2p9eKg0vEWDZ5PGqnun70D2r401alpHtiw4pJDfbDn9MVzuq2P%2Bc4WTsV9e%2BBuH3hqU47OTy3y%2B%2FojWchTk8mRAEESDqoqQh2dxi1e7EiCxTFsR7Hw%3D%3D&Expires=1774443104)
