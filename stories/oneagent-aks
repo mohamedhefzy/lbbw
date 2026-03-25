@@ -1,0 +1,21 @@
+Problem
+
+    Currently, Dynatrace OneAgent Logshipping is not clearly configured for AKS and VMs, or is not cost-optimized.
+    Assumption: It is not clearly regulated which logs are sent to Dynatrace by default; this means that there is a risk of unnecessary log costs.
+    The goal is a setup where:
+        no logs are automatically sent to Dynatrace (cost control),
+        If necessary, application owners can control themselves which logs go to Dynatrace.
+    For VMs, a defined folder should be available in which logged files can be placed/configured if necessary, so that they are automatically sent to Dynatrace.
+    For AKS, an analog, practical procedure should be implemented (e.g. via annotations, specific paths or sidecar/agent configuration) so that application owners can independently activate logshipping.
+    The procedure (incl. Examples of VM & AKS) are to be documented in the Skywalker Academy as instructions.
+
+Acceptance criteria (definition of done)
+
+    For AKS, an analogous behavior to VM, documented procedure is implemented, with which Application Owner per application/namespace can specifically determine whether/which logs are sent to Dynatrace (e.g. via conventions, annotations or predefined mount paths), and this behavior is checked in a test namespace.
+        It takes into account how applications need to label their logs/pods/namespaces in order for the logs to be properly mappable.
+        by default only necessary platform logs are automatically sent to Dynatrace,
+        The behavior is verified
+    A sync with the 2nd level operation has taken place to define the minimum set of operating logs and to include them.
+        The necessary platform logs are taken into account
+    The configuration is recorded in the Dynatrace inventory documentation.
+    The necessary changes are reserved for the next release end of Sprint 4.
