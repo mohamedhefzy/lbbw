@@ -1,0 +1,16 @@
+---
+- name: >
+    Basic OneAgent installation using a local installer.
+    Main node communicates with Windows hosts over WINRM.
+  hosts: all
+  remote_user: "{{ ansible_username }}"
+  become_method: runas
+  vars:
+    ansible_connection: winrm
+    ansible_port: 5986
+    ansible_winrm_transport: credssp
+    ansible_winrm_server_cert_validation: ignore
+  tasks:
+    - name: Import Dynatrace OneAgent role
+      ansible.builtin.import_role:
+        name: "./dynatrace-oneagent/roles/oneagent"
