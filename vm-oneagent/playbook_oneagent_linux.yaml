@@ -1,0 +1,14 @@
+---
+- name: >
+    Basic OneAgent installation using a local installer.
+    Main node communicates with Linux hosts over SSH.
+  hosts: all
+  remote_user: "{{ ansible_username }}"
+  become: yes
+  vars:
+    ansible_shell_type: sh
+    ansible_connection: ssh
+  tasks:
+    - name: Import Dynatrace OneAgent role
+      ansible.builtin.import_role:
+        name: "./dynatrace-oneagent/roles/oneagent"
