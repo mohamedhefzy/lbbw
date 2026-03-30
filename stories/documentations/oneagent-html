@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Dynatrace Log Shipping — Cost‑Controlled Opt‑In Model for VMs & AKS</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<style>
+  body { font-family: Arial, Helvetica, sans-serif; line-height:1.5; color:#172b4d; }
+  h1,h2,h3,h4 { color:#0052cc; }
+  code, pre { font-family: Consolas, monospace; background:#f4f5f7; }
+  pre { padding:12px; border-radius:4px; overflow:auto; }
+  .panel {
+    border:1px solid #dfe1e6;
+    border-radius:6px;
+    padding:12px;
+    margin:16px 0;
+    background:#fafbfc;
+  }
+  .note {
+    border-left:4px solid #0052cc;
+    padding:10px;
+    background:#e9f2ff;
+    margin:16px 0;
+  }
+  .screenshot {
+    border: 1px solid #dfe1e6;
+    border-radius:6px;
+    margin:12px 0;
+    max-width:100%;
+  }
+  hr { border:none; border-top:1px solid #dfe1e6; margin:28px 0; }
+</style>
+</head>
+<body>
+
+<h1>Dynatrace Log Shipping — Cost‑Controlled Opt‑In Model for VMs & AKS</h1>
+
+<p><strong>Owner:</strong> Platform Engineering<br/>
+<strong>Status:</strong> Active – Sprint implementation (Release end of Sprint 4)</p>
+
+<div class="note">
+<strong>Goal:</strong>
+<ul>
+  <li>Prevent unnecessary Dynatrace log ingestion costs.</li>
+  <li>No application logs ingested by default.</li>
+  <li>Application owners explicitly opt‑in.</li>
+  <li>Clear, documented procedures for VMs and AKS.</li>
+</ul>
+</div>
+
+<hr/>
+
+<h2>1. Target Concepts</h2>
+
+<h3>Virtual Machines (VMs)</h3>
+<ul>
+  <li>Only minimum platform logs are ingested by default.</li>
+  <li>Application logs are ingested <b>only</b> from a defined directory.</li>
+</ul>
+
+<h3>Azure Kubernetes Service (AKS)</h3>
+<ul>
+  <li>Container logs are <b>not ingested by default</b>.</li>
+  <li>Application owners opt‑in via namespace labeling.</li>
+  <li>Only container <code>stdout / stderr</code> logs are collected.</li>
+</ul>
+
+<hr/>
+
+<h2>2. VM Configuration — Dynatrace OneAgent</h2>
+
+<h3>2.1 Define Custom Log Sources (VMs)</h3>
+
+<div class="panel">
+<p><strong>Dynatrace UI Path:</strong><br/>
+Settings → Log Monitoring → Custom log sources</p>
+
+<ul>
+  <li>Rule name: <code>VM-App-Logs</code></li>
+  <li>Linux path: <code>/var/log/dynatrace/app-logs/*.log</code></li>
+  <li>Windows path: <code>C:\Dynatrace\Logs\*.log</code></li>
+</ul>
+</div>
+
+<img class="screenshot" src="CUSTOM_LOG_SOURCES_VM.PNG"
+alt="Dynatrace Custom Log Sources configuration for VMs"/>
+
+<p><i>This ensures OneAgent monitors only those directories for application logs.</i></p>
+
+<hr/>
+
+<h3>2.2 Log Ingest Rule — Default Exclude</h3>
+
+<div class="panel">
+<ul>
+  <li>Rule name: <code>Exclude-NonPlatform-Logs</code></li>
+  <li>Type: <b>Exclude from storage</b></li>
+  <li>Paths:
+    <ul>
+      <li><code>/var/log/**</code></li>
+      <li><code>C:\**</code></li>
+    </ul>
+  </li>
+</ul>
+</div>
+
+<img class="screenshot" src="LOG_INGEST_RULE_EXCLUDE.PNG"
+alt="Dynatrace log ingest rule excluding non platform logs"/>
+
+<p><i>This rule prevents accidental ingestion of application logs.</i></p>
+
+<hr/>
+
+<h3>2.3 Log Ingest Rule — Allowlist Application Folder</h3>
+
+<div class="panel">
+<ul>
+  <li>Rule name: <code>Include-VM-App-Log-Dir</code></li>
+  <li>Type: <b>Include in storage</b></li>
+  <li>Allowed paths:
+    <ul>
+      <li><code>/var/log/dynatrace/app-logs/*.log</code></li>
+      <li><code>C:\Dynatrace\Logs\*.log</code></li>
+    </ul>
+  </li>
+</ul>
+</div>
+
+<img class="screenshot" src="LOG_INGEST_RULE_INCLUDE_VM.PNG"
+alt="Dynatrace allowlist ingest rule for VM application logs"/>
+
+<hr/>
+
+<h2>3. AKS Configuration — Namespace Opt‑In</h2>
+
+<h3>3.1 Enable Log Module in DynaKube</h3>
+
+<div class="panel">
+<pre><code class="yaml">
+spec:
+  logMonitoring: {}
+</code></pre>
+</div>
+
+<p>This enables Dynatrace Log Module to capture container <code>stdout / stderr</code>.</p>
+
+<hr/>
+
+<h3>3.2 Namespace Opt‑In (Application Owner)</h3>
+
+<div class="panel">
+<pre><code>
+kubectl label namespace payments dt.logs=enabled --overwrite
+</code></pre>
+</div>
+
+<img class="screenshot" src="K8S_NAMESPACE_LABEL.PNG"
+alt="Kubernetes namespace labeling for Dynatrace logs opt-in"/>
+
+<p><i>Only namespaces with this label are eligible for log ingestion.</i></p>
+
+<hr/>
+
+<h3>3.3 Log Ingest Rule — AKS Namespace Allowlist</h3>
+
+<div class="panel">
+<ul>
+  <li>Rule name: <code>Include-AKS-OptIn-Namespaces</code></li>
+  <li>Type: <b>Include in storage</b></li>
+  <li>Matcher:
+    <ul>
+      <li>Kubernetes namespace name IN:
+        <code>payments</code>, <code>orders</code>, <code>team-a</code>
+      </li>
+    </ul>
+  </li>
+</ul>
+</div>
+
+<img class="screenshot" src="LOG_INGEST_RULE_AKS.PNG"
+alt="Dynatrace log ingest rule for AKS opt-in namespaces"/>
+
+<hr/>
+
+<h2>4. Verification</h2>
+
+<h3>VM Verification</h3>
+<ul>
+  <li>Log file in allowlisted directory → visible in Dynatrace Logs.</li>
+  <li>Log file elsewhere → not ingested.</li>
+</ul>
+
+<h3>AKS Verification</h3>
+<ul>
+  <li>Namespace without label → no logs.</li>
+  <li>Namespace labeled <code>dt.logs=enabled</code> → logs appear.</li>
+</ul>
+
+<img class="screenshot" src="DT_LOGS_VIEW.PNG"
+alt="Dynatrace Logs view verifying application logs"/>
+
+<hr/>
+
+<h2>5. Documentation & Inventory</h2>
+
+<ul>
+  <li>Skywalker Academy:
+    <ul>
+      <li>VM log folder convention</li>
+      <li>AKS opt‑in steps for app owners</li>
+    </ul>
+  </li>
+  <li>Dynatrace Inventory:
+    <ul>
+      <li>Active log ingest rules</li>
+      <li>Allowed log paths</li>
+      <li>AKS namespaces enabled</li>
+    </ul>
+  </li>
+</ul>
+
+<hr/>
+
+<h2>6. Key Takeaway</h2>
+
+<div class="note">
+Default ingestion is minimal.<br/>
+Application teams opt‑in consciously.<br/>
+Costs stay predictable and auditable.
+</div>
+
+</body>
+</html>
