@@ -1,0 +1,431 @@
+Below is a **Confluence‑ready guide** you can paste as-is. It includes a clear operating model, **step‑by‑step procedures**, and **exact Dynatrace configuration examples** for **VMs** and **AKS**, plus verification and runbook notes.
+
+***
+
+# Dynatrace Log Shipping — Cost‑Controlled Opt‑In Model for VMs & AKS
+
+**Owner:** Platform Engineering  
+**Last updated:** {{today}}  
+**Status:** Implement **this sprint**; release **end of Sprint 4**
+
+***
+
+## 1) Executive Summary
+
+We will implement a **cost‑controlled log ingestion model** in Dynatrace:
+
+*   **Default**: only the **minimum platform logs** are ingested. Application logs are **not** ingested by default (cost control).
+*   **Opt‑in**: App owners can **explicitly enable** their logs:
+    *   **VMs**: by writing logs into a **defined directory** that we ingest.
+    *   **AKS**: by **labeling/annotating** their namespaces/pods per convention and writing logs to **stdout/stderr** (preferred) or using a sidecar to forward file logs to stdout. Dynatrace’s Kubernetes log module automatically discovers container stdout/stderr and can be controlled centrally via cluster‑scoped **log ingest rules** that match Kubernetes metadata. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/ingest-from/setup-on-k8s/deployment/k8s-log-monitoring), [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-logs-from-kubernetes)
+
+This approach leverages:
+
+*   **Dynatrace OneAgent/Kubernetes Log module** auto‑discovery of container stdout/stderr, with **central “Log ingest rules”** to include/exclude sources. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/ingest-from/setup-on-k8s/deployment/k8s-log-monitoring), [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-log-storage-configuration)
+*   **Dynatrace custom log sources** for VMs when a directory must be whitelisted, combined with ingest rules to store only what we approve. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-custom-log-source)
+
+***
+
+## 2) Scope & goals
+
+*   **In‑scope**: Linux & Windows VMs with OneAgent; AKS clusters with Dynatrace Operator.
+*   **Out‑of‑scope**: Non‑Kubernetes container platforms; third‑party collectors running outside the agreed model.
+
+**Goals**
+
+1.  Default posture: **ingest only platform‑essential logs**. (Define “minimum set” with 2nd‑level Ops.)
+2.  **Self‑service opt‑in** for application logs (VMs & AKS).
+3.  **Documented conventions** and **verification steps**.
+4.  **Inventory updates** in Dynatrace documentation.
+
+***
+
+## 3) Target design (high level)
+
+### 3.1 VMs
+
+*   **Convention** (proposal):
+    *   Linux app logs: `/var/log/dynatrace/app-logs/`
+    *   Windows app logs: `C:\Dynatrace\Logs\`
+*   **Dynatrace**: create **Custom log source** pointing to these paths; then add **Log ingest rules** to include these paths and **exclude all other application log paths** by default. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-custom-log-source), [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-log-storage-configuration)
+
+### 3.2 AKS
+
+*   Use **Dynatrace Operator**; enable **logMonitoring**. The log module automatically discovers container **stdout/stderr**; file logs inside containers are **not** discovered unless shipped to stdout (use app change or sidecar). [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/ingest-from/setup-on-k8s/deployment/k8s-log-monitoring), [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-logs-from-kubernetes)
+*   **Opt‑in** via **namespace label** (e.g., `dt.logs=enabled`) and **cluster‑scoped ingest rule** that includes only those namespaces; default excludes everything except the minimum platform logs. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-log-storage-configuration)
+*   If you need to limit Dynatrace injection (for full‑stack) to a subset of namespaces, use `namespaceSelector` in the **DynaKube** CR (Operator) and add an allow‑label (e.g., `dt-monitoring=true`). [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/ingest-from/setup-on-k8s/guides/deployment-and-configuration/monitoring-and-instrumentation/annotate)
+
+> **Note**: Kubernetes events can also be monitored and filtered in Dynatrace if needed. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/observe/infrastructure-observability/container-platform-monitoring/kubernetes-monitoring/monitor-events-kubernetes)
+
+***
+
+## 4) Minimum platform logs (with 2nd‑level Ops)
+
+Agree on the **minimum platform log set** to ingest by default at environment/cluster scope (examples):
+
+*   Linux host: system logs necessary for operations (e.g., syslog/journald) — define exact files with Ops.
+*   Kubernetes control plane/platform signals (events; kube metrics are covered by platform monitoring). Dynatrace can ingest **Kubernetes events** with filtering; decide which categories are required. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/observe/infrastructure-observability/container-platform-monitoring/kubernetes-monitoring/monitor-events-kubernetes)
+*   Avoid broad application log ingestion by default; add only via opt‑in.
+
+(Record final list here after Ops sync.)
+
+***
+
+## 5) Implementation — **VMs**
+
+### 5.1 OneAgent checks (host level)
+
+1.  Verify log monitoring status (optional; enabled by default):
+    *   **Global**: *Settings → Monitoring → Monitored technologies → Log Monitoring* (ensure enabled). [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/log-monitoring/log-monitoring-configuration)
+    *   **Host** CLI:
+        ```bash
+        # Linux
+        ./oneagentctl --get-app-log-content-access
+        # Windows (PowerShell)
+        .\oneagentctl.exe --get-app-log-content-access
+        ```
+        Enable if needed:
+        ```bash
+        ./oneagentctl --set-app-log-content-access=true
+        .\oneagentctl.exe --set-app-log-content-access=true
+        ```
+        (Restart OneAgent service after change.) [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/log-monitoring/log-monitoring-configuration)
+
+### 5.2 Define **Custom log source** (central)
+
+Dynatrace UI: **Settings → Log Monitoring → Custom log sources → Add custom log source**:
+
+*   Rule name: `VM-App-Logs`
+*   **Log path** (Linux): `/var/log/dynatrace/app-logs/*.log`
+*   **Log path** (Windows): `C:\Dynatrace\Logs\*.log`
+*   (Optional) bind to Process Groups if you need tighter scoping.
+*   Save.  
+    Custom sources let OneAgent monitor paths that aren’t auto‑detected. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-custom-log-source)
+
+### 5.3 Create **Log ingest rules** (central)
+
+Dynatrace UI: **Settings → Log Monitoring → Log ingest rules**:
+
+1.  **Default “exclude”** (environment scope):
+    *   Rule: `Exclude-All-App-Logs`
+    *   Type: **Exclude from storage**
+    *   Matchers: *broad patterns* that would otherwise pull app logs (e.g., `/var/log/**`, except the allowlist path).
+    *   This acts as a guardrail. (Rules are processed top‑to‑bottom; host‑scope overrides environment‑scope.) [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-log-storage-configuration)
+
+2.  **Allowlist for our folder(s)** (environment or host group scope):
+    *   Rule: `Include-VM-App-Log-Dir`
+    *   Type: **Include in storage**
+    *   Matcher: **Log source** `=/var/log/dynatrace/app-logs/*.log` (Linux) and `=C:\Dynatrace\Logs\*.log` (Windows).
+    *   (Optional) Add **content matchers** (e.g., only `ERROR|WARN`) to further reduce costs. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-log-storage-configuration)
+
+> **Why this works:** OneAgent auto‑discovers many logs, but only **ingest rules** decide what is stored/billed. Use include/exclude rules to control costs at scale. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-use-cases/lma-oa-logs-ingest), [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-log-storage-configuration)
+
+### 5.4 VM test & verification
+
+*   On a **test VM**, write a small file under the folder and ensure it appears in **Dynatrace → Logs**; files elsewhere should **not** appear.
+*   Use the built‑in **Log ingestion overview** dashboard to verify volumes. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-use-cases/lma-oa-logs-ingest)
+
+***
+
+## 6) Implementation — **AKS**
+
+### 6.1 Install/verify Dynatrace Operator (once per cluster)
+
+Follow “Full‑Stack observability” or “Platform monitoring + Log module” quickstart. Example (Helm/OCI per docs): [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/ingest-from/setup-on-k8s/deployment/full-stack-observability)
+
+```bash
+# (Example) Install Dynatrace Operator using Helm (per official docs)
+# See docs for the current commands and flags
+```
+
+### 6.2 Enable **logMonitoring** in DynaKube CR
+
+Create or update the **DynaKube** custom resource and include `spec.logMonitoring: {}`. This enables the log module (either with OneAgent on node or standalone mode depending on your observability option). [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/ingest-from/setup-on-k8s/deployment/k8s-log-monitoring)
+
+```yaml
+apiVersion: dynatrace.com/v1beta5
+kind: DynaKube
+metadata:
+  name: dynakube
+  namespace: dynatrace
+spec:
+  apiUrl: https://<YOUR_ENV>.live.dynatrace.com/api
+  # Full-stack example: oneAgent.cloudNativeFullStack: {}
+  logMonitoring: {}
+```
+
+**What gets collected?**  
+The module **auto‑discovers container stdout/stderr** files; log records are enriched with Kubernetes metadata (namespace, pod, container, etc.). It **does not** discover file logs inside the container filesystem; for those, **write to stdout** or use a **sidecar** that tails files to stdout. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-logs-from-kubernetes)
+
+### 6.3 Namespace‑level **opt‑in** convention
+
+We’ll only ingest logs from namespaces labeled `dt.logs=enabled`.
+
+1.  App team labels their namespace:
+
+```bash
+kubectl label namespace my-app-ns dt.logs=enabled --overwrite
+```
+
+2.  Create **cluster‑scoped Log ingest rule(s)** in Dynatrace to **Include** logs **only** where `k8s.namespace.name` matches namespaces labeled `dt.logs=enabled` (or maintain an allowlist of those namespaces in the rule). Dynatrace supports controlling Kubernetes log ingestion with **Kubernetes metadata** matchers; rules can be scoped at **Kubernetes cluster level** for precise control. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-logs-from-kubernetes), [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-log-storage-configuration)
+
+> If you also want to limit **OneAgent injection** to certain namespaces (for full‑stack), configure the DynaKube **`namespaceSelector`** to include only namespaces with `dt-monitoring=true`. This controls injection, not ingestion, but often you’ll use both controls together. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/ingest-from/setup-on-k8s/guides/deployment-and-configuration/monitoring-and-instrumentation/annotate)
+
+### 6.4 Pod‑level annotation (optional fine‑grain)
+
+For temporary inclusion/exclusion at pod level, teams can add annotations and you can refine **ingest rules** with pod metadata. Dynatrace supports **metadata enrichment** via labels/annotations; the Operator also supports annotation/label‑based monitoring controls (see docs for available keys). [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/ingest-from/setup-on-k8s/guides/deployment-and-configuration/monitoring-and-instrumentation/annotate), [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-logs-from-kubernetes)
+
+### 6.5 AKS test & verification
+
+*   **Test namespace** without label → logs should **not** appear.
+*   Label `dt.logs=enabled` → logs start appearing (stdout/stderr).
+*   For file‑based logs, validate the **sidecar to stdout** pattern (e.g., `tail -F /app/log/*.log` to stdout). Dynatrace sees stdout; no file mounts needed at the agent. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-logs-from-kubernetes)
+
+***
+
+## 7) Dynatrace — **Exact configuration examples**
+
+### 7.1 **Log ingest rule** examples (UI)
+
+**Path:** *Settings → Log Monitoring → Log ingest rules*
+
+**A) Global default exclude (guardrail)**
+
+*   **Name**: `Exclude-NonPlatform-Logs`
+*   **Type**: **Exclude from storage**
+*   **Scope**: Environment (or per cluster override)
+*   **Matchers**: Broad app paths (refine as you learn).  
+    Rules are processed **top‑to‑bottom**, and can be overridden at host/cluster scopes. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-log-storage-configuration)
+
+**B) VM allowlist directories**
+
+*   **Name**: `Include-VM-App-Logs-Folders`
+*   **Type**: **Include in storage**
+*   **Matchers**: **Log source**
+    *   `/var/log/dynatrace/app-logs/*.log`
+    *   `C:\Dynatrace\Logs\*.log`
+*   (Optional) Add content/level matchers (e.g., `ERROR|WARN`) to reduce volume. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-log-storage-configuration)
+
+**C) AKS namespace allowlist (opt‑in)**
+
+*   **Name**: `Include-AKS-OptIn-Namespaces`
+*   **Type**: **Include in storage**
+*   **Scope**: **Kubernetes cluster** (override)
+*   **Matchers**: `k8s.namespace.name IN [ "team-a", "payments", "foo-bar" ]`  
+    (Use your allowlisted namespaces labeled `dt.logs=enabled`.) Dynatrace allows controlling ingestion with **Kubernetes metadata** and configuring rules at **Kubernetes cluster** scope. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-logs-from-kubernetes)
+
+> Tip: Keep a small “starter allowlist” this sprint; expand later. The **Enablement Lab** walkthrough shows where to create rules and how cluster overrides work. [\[dynatrace-....github.io\]](https://dynatrace-wwse.github.io/enablement-dynatrace-log-ingest-101/5-configure-dynatrace/)
+
+### 7.2 **Custom log source** (VMs)
+
+**Path:** *Settings → Log Monitoring → Custom log sources → Add*
+
+*   **Rule name**: `VM-App-Logs`
+*   **Log path**: add the OS‑specific path(s)
+*   (Optional) set encoding, allow binary content if needed.  
+    This enables OneAgent to track those files; **ingest still requires a rule** (above). [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-custom-log-source)
+
+### 7.3 **DynaKube CR** (Operator) — log module enabled + selective injection (optional)
+
+```yaml
+apiVersion: dynatrace.com/v1beta5
+kind: DynaKube
+metadata:
+  name: dynakube
+  namespace: dynatrace
+spec:
+  apiUrl: https://<YOUR_ENV>.live.dynatrace.com/api
+
+  # Enable log module
+  logMonitoring: {}
+
+  # (Optional) Only inject into namespaces you label dt-monitoring=true
+  oneAgent:
+    cloudNativeFullStack:
+      namespaceSelector:
+        matchLabels:
+          dt-monitoring: "true"
+```
+
+*   `logMonitoring: {}` enables the log module (auto‑discovers stdout/stderr). [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/ingest-from/setup-on-k8s/deployment/k8s-log-monitoring)
+*   `namespaceSelector` lets you limit full‑stack injection to labeled namespaces. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/ingest-from/setup-on-k8s/guides/deployment-and-configuration/monitoring-and-instrumentation/annotate)
+
+***
+
+## 8) App team guidance (to include in Academy)
+
+### 8.1 VMs (developers)
+
+*   **To ship logs to Dynatrace**: write your log files to:
+    *   Linux: `/var/log/dynatrace/app-logs/`
+    *   Windows: `C:\Dynatrace\Logs\`
+*   Don’t write secrets/PPI to logs; follow our **masking** policy.
+*   Expect ingestion within \~1–2 minutes after first write (check Logs app).
+
+### 8.2 AKS (developers)
+
+*   **Preferred**: write logs to **stdout/stderr**. Dynatrace’s log module auto‑discovers container output. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-logs-from-kubernetes)
+*   **If your app writes files**, add a **sidecar** to tail files to stdout; or refactor logging to stdout. Dynatrace’s module does not read container filesystem logs by itself. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-logs-from-kubernetes)
+*   Ask your Platform contact to **label your namespace**:
+    ```bash
+    kubectl label ns <your-ns> dt.logs=enabled --overwrite
+    ```
+    Your logs appear after the cluster‑scoped rule includes your namespace.
+*   Add consistent labels to your Pods (e.g., `app.kubernetes.io/name`, `team`, `env`) to improve mapping and search. Dynatrace **enriches logs with k8s metadata** automatically. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-logs-from-kubernetes)
+
+***
+
+## 9) Verification & runbook
+
+### 9.1 Verify ingestion (both VM and AKS)
+
+*   **Dynatrace → Logs**: filter by `k8s.namespace.name`, `host.name` or **Log source** (VM path).
+*   Use **Log ingestion overview** dashboard to confirm recent volumes. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-use-cases/lma-oa-logs-ingest)
+
+### 9.2 Troubleshooting
+
+*   VM: confirm OneAgent log access (`oneagentctl --get-app-log-content-access`). [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/log-monitoring/log-monitoring-configuration)
+*   AKS:
+    *   `kubectl -n dynatrace get pods` to ensure Operator/log module pods are healthy. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/ingest-from/setup-on-k8s/deployment/full-stack-observability)
+    *   Ensure logs are written to **stdout** (or sidecar is tailing to stdout). [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-logs-from-kubernetes)
+    *   Confirm namespace is in allowlist / labeled as per model.
+
+***
+
+## 10) Inventory & release notes
+
+*   Update **Dynatrace inventory documentation** with:
+    *   Final “minimum platform logs”
+    *   Active **Log ingest rules** (+ scopes)
+    *   VM **Custom log sources** (paths)
+    *   AKS: clusters onboarded; namespaces enabled
+*   Release planned **end of Sprint 4** (config frozen at code freeze).
+
+***
+
+# Appendices — Copy/Paste **Configuration Examples**
+
+## A) Dynatrace **Log ingest rule** (illustrative matcher JSON)
+
+> Configure via **UI** under *Settings → Log Monitoring → Log ingest rules*. The following shows an **illustrative** Settings payload structure for documentation purposes. Use UI unless you manage settings via API.
+
+```jsonc
+// Include logs from AKS namespaces that opted in (example allowlist)
+{
+  "enabled": true,
+  "send-to-storage": true,
+  "matchers": [
+    { "attribute": "k8s.namespace.name", "operator": "IN", "values": ["payments", "orders", "team-a"] }
+  ],
+  "name": "Include-AKS-OptIn-Namespaces"
+}
+```
+
+Dynatrace supports controlling Kubernetes log ingestion with **Kubernetes metadata** and cluster‑level overrides for precise control. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-logs-from-kubernetes), [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-log-storage-configuration)
+
+```jsonc
+// Include only VM app directories (Linux & Windows)
+{
+  "enabled": true,
+  "send-to-storage": true,
+  "matchers": [
+    { "attribute": "log.source", "operator": "MATCHES", "values": ["/var/log/dynatrace/app-logs/*.log", "C:\\\\Dynatrace\\\\Logs\\\\*.log"] }
+  ],
+  "name": "Include-VM-App-Log-Dir"
+}
+```
+
+Custom log sources define the paths; ingest rules decide what’s stored/billed. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-custom-log-source), [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-log-storage-configuration)
+
+```jsonc
+// Default guardrail - exclude broad app paths (refine for your env)
+{
+  "enabled": true,
+  "send-to-storage": false, // Exclude
+  "matchers": [
+    { "attribute": "log.source", "operator": "MATCHES", "values": ["/var/log/**","C:\\\\**"] }
+  ],
+  "name": "Exclude-NonPlatform-Logs"
+}
+```
+
+Rules are processed top‑to‑bottom; host/cluster scopes can override environment scope. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-log-storage-configuration)
+
+***
+
+## B) **Custom log source** (VMs) — what to click
+
+*   *Settings → Log Monitoring → Custom log sources → Add*
+    *   Rule name: `VM-App-Logs`
+    *   Log path: `/var/log/dynatrace/app-logs/*.log` (Linux)
+    *   Log path: `C:\Dynatrace\Logs\*.log` (Windows)
+    *   Save.  
+        This enables OneAgent to watch the paths; you still **must** create an ingest rule to store them. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-custom-log-source)
+
+***
+
+## C) **DynaKube CR** with namespaceSelector & logMonitoring
+
+```yaml
+apiVersion: dynatrace.com/v1beta5
+kind: DynaKube
+metadata:
+  name: dynakube
+  namespace: dynatrace
+spec:
+  apiUrl: https://<YOUR_ENV>.live.dynatrace.com/api
+
+  # Enable the log module (auto-discovers stdout/stderr)
+  logMonitoring: {}
+
+  # Optional: restrict OneAgent injection to specific namespaces
+  oneAgent:
+    cloudNativeFullStack:
+      namespaceSelector:
+        matchLabels:
+          dt-monitoring: "true"
+```
+
+*   **logMonitoring** enables Kubernetes log module. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/ingest-from/setup-on-k8s/deployment/k8s-log-monitoring)
+*   **namespaceSelector** controls where the Operator injects full‑stack instrumentation. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/ingest-from/setup-on-k8s/guides/deployment-and-configuration/monitoring-and-instrumentation/annotate)
+
+***
+
+## D) AKS **developer example** (namespace opt‑in)
+
+```bash
+# App team: request opt-in by labeling namespace
+kubectl label ns payments dt.logs=enabled --overwrite
+
+# (Platform) Ensure your "Include-AKS-OptIn-Namespaces" rule lists 'payments'
+# Logs written to stdout/stderr will be ingested; file logs require sidecar to stdout.
+```
+
+The Dynatrace log module **auto‑discovers stdout/stderr**; for file logs, **forward to stdout** (sidecar or app change). [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-logs-from-kubernetes)
+
+***
+
+## E) Operational tips for **cost control**
+
+*   Start with a **narrow allowlist**; expand only on request.
+*   Prefer **stdout/stderr** for containers, avoid file logs in containers unless a sidecar tails to stdout. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-logs-from-kubernetes)
+*   Use **content/level matchers** (e.g., `ERROR|WARN`) where useful. Dynatrace recommends central control of OneAgent ingestion with Settings 2.0 rules and advanced log settings at scale. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/advanced-log-settings), [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-log-storage-configuration)
+
+***
+
+## F) References
+
+*   **Kubernetes log monitoring (Dynatrace)** — auto‑discovery of stdout/stderr, deployment options, Operator‑managed log module. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/ingest-from/setup-on-k8s/deployment/k8s-log-monitoring)
+*   **Stream Kubernetes logs with Dynatrace log module** — metadata enrichment, control via K8s metadata, file‑log caveat. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-logs-from-kubernetes)
+*   **Log ingest rules (Settings 2.0)** — include/exclude, scopes, matchers, processing order. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-log-storage-configuration)
+*   **Custom log sources (VMs)** — centrally add paths not auto‑detected. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-log-ingestion/lma-log-ingestion-via-oa/lma-custom-log-source)
+*   **OneAgent for logs ingestion** — auto‑discovery, central rule config, overview dashboards. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/analyze-explore-automate/logs/lma-use-cases/lma-oa-logs-ingest)
+*   **Configure monitoring for namespaces/pods** — `namespaceSelector`, annotation controls for injection/enrichment. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/ingest-from/setup-on-k8s/guides/deployment-and-configuration/monitoring-and-instrumentation/annotate)
+*   **Operator quickstart (Full‑stack & platform monitoring)** — current install approach. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/ingest-from/setup-on-k8s/deployment/full-stack-observability)
+*   **Kubernetes events monitoring** — optional, with filtering. [\[docs.dynatrace.com\]](https://docs.dynatrace.com/docs/observe/infrastructure-observability/container-platform-monitoring/kubernetes-monitoring/monitor-events-kubernetes)
+
+***
+
+### Want me to generate a **Confluence export** (HTML with anchors) or a **PDF** version too?
+
+I can also supply a **Settings 2.0 API** JSON for the ingest rules if you prefer to manage these by code.
