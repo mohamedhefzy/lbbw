@@ -1,0 +1,439 @@
+# CONFLUENCE PAGE - READY TO COPY & PASTE
+
+```
+{panel:bgColor=#f0f5ff|borderColor=#0052cc|title=Dynatrace Log Shipping - Cost Optimization Guide}
+Last Updated: Sprint 4
+Owner: Platform Engineering Team
+Status: Production Ready
+{panel}
+
+h1. Overview
+
+h2. The Problem
+
+We were shipping logs to Dynatrace without clear control or cost optimization. This meant:
+- Uncontrolled log ingestion causing unexpected costs
+- No clear separation between platform and application logs
+- Inconsistent configuration across AKS clusters and VMs
+- Application teams had no way to manage their own logs
+
+h2. The Solution
+
+We've implemented a cost-optimized approach where:
+- By default, only pre-approved platform logs are shipped
+- Application teams can opt-in to ship their own logs
+- The approach is consistent across AKS and VMs
+- Every log shipping decision is tracked and auditable
+
+h2. Expected Benefits
+
+- 80-90% reduction in unexpected log costs
+- Application teams have full control and autonomy
+- Clear audit trail of what logs are being shipped
+- Easy to disable if logs are no longer needed
+
+---
+
+h1. How It Works
+
+h2. The Core Principle: Default Deny, Explicit Opt-in
+
+Think of it like this:
+- By default, no application logs are sent to Dynatrace
+- We only ship logs that the operations team has pre-approved as essential
+- If your team needs logs in Dynatrace, you explicitly enable them
+- You control which logs get shipped and can disable anytime
+
+{info}
+Platform logs (kernel events, security logs, OneAgent diagnostics) are automatically shipped by default. These are essential for monitoring and compliance. You don't need to do anything to get these.
+{info}
+
+---
+
+h1. For AKS Users
+
+h2. What You Need to Know
+
+Your applications run in Kubernetes pods. To enable log shipping, you add a simple annotation to your pod configuration. That's it. OneAgent will automatically read these annotations and start shipping logs.
+
+h2. Enable Log Shipping
+
+Add these lines to your deployment metadata. Replace the paths with your actual log file locations.
+
+{code:language=yaml}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  namespace: my-namespace
+spec:
+  template:
+    metadata:
+      annotations:
+        dynatrace.com/log-shipping: "true"
+        dynatrace.com/log-paths: |
+          /var/log/app/application.log
+          /var/log/app/error.log
+    spec:
+      containers:
+      - name: my-app
+        image: my-image:latest
+{code}
+
+h2. Optional Settings
+
+If you want more control, you can add these optional annotations:
+
+{code:language=yaml}
+# Send only error and warning logs (reduces volume)
+dynatrace.com/log-level: "WARN,ERROR"
+
+# Specify log format for better parsing
+dynatrace.com/log-format: "json"
+
+# Add custom labels for organization
+dynatrace.com/log-labels: "team=backend,service=payments,env=prod"
+{code}
+
+h2. What Happens Next
+
+After you apply your deployment, give it about 5 minutes. Then go into Dynatrace and look at the Logs section. You should see your application logs appear. If they don't show up, see the troubleshooting section below.
+
+h2. Disable Log Shipping
+
+Just remove the annotations from your deployment and redeploy. Logs will stop appearing within 5 minutes.
+
+---
+
+h1. For Linux VM Users
+
+h2. What You Need to Know
+
+On Linux VMs, we use a folder-based approach. You create symlinks from your log files to a special monitoring directory. OneAgent automatically picks up anything in that directory.
+
+h2. Directory Structure
+
+We've created this structure on your VMs:
+
+{code}
+/opt/dynatrace/logshipping/
+├── platform/              <- Platform logs (always monitored)
+│   ├── kernel/
+│   ├── audit/
+│   └── system/
+└── applications/          <- Your application logs (opt-in)
+    ├── my-app/
+    └── other-app/
+{code}
+
+h2. Enable Log Shipping
+
+Open a terminal and run these commands. Replace "my-app" with your application name and update the paths to match your log locations.
+
+{code:language=bash}
+# Step 1: Create a directory for your application
+mkdir -p /opt/dynatrace/logshipping/applications/my-app
+
+# Step 2: Create symlinks to your log files
+ln -s /var/log/my-app/application.log /opt/dynatrace/logshipping/applications/my-app/app.log
+ln -s /var/log/my-app/error.log /opt/dynatrace/logshipping/applications/my-app/error.log
+
+# Step 3: Verify it worked
+ls -la /opt/dynatrace/logshipping/applications/my-app/
+{code}
+
+h2. What Happens Next
+
+OneAgent checks this directory every few minutes. Within 5 minutes, your logs should appear in Dynatrace. Go to the Logs section and search for your application name.
+
+h2. Disable Log Shipping
+
+When you no longer need logs in Dynatrace:
+
+{code:language=bash}
+rm -rf /opt/dynatrace/logshipping/applications/my-app
+{code}
+
+That's it. Logs will stop appearing within 5 minutes.
+
+---
+
+h1. For Windows VM Users
+
+h2. What You Need to Know
+
+On Windows VMs, we use a folder-based approach. You copy your log files to a special monitoring directory. OneAgent automatically picks up anything new in that directory.
+
+h2. Directory Structure
+
+We've created this structure on your VMs:
+
+{code}
+C:\Dynatrace\LogShipping\
+├── Platform\              <- Platform logs (always monitored)
+│   ├── System\
+│   ├── Security\
+│   └── Application\
+└── Applications\          <- Your application logs (opt-in)
+    ├── MyApp\
+    └── OtherApp\
+{code}
+
+h2. Enable Log Shipping
+
+Open PowerShell and run these commands. Replace "MyApp" with your application name and update the paths to match your log locations.
+
+{code:language=powershell}
+# Step 1: Create a directory for your application
+New-Item -ItemType Directory -Path "C:\Dynatrace\LogShipping\Applications\MyApp" -Force
+
+# Step 2: Copy your log files
+Copy-Item -Path "C:\Logs\MyApp\*.log" -Destination "C:\Dynatrace\LogShipping\Applications\MyApp\"
+
+# Step 3: Verify it worked
+Get-ChildItem -Path "C:\Dynatrace\LogShipping\Applications\MyApp\"
+{code}
+
+h2. What Happens Next
+
+OneAgent checks this directory every few minutes. Within 5 minutes, your logs should appear in Dynatrace. Go to the Logs section and search for your application name.
+
+h2. Continuous Updates (Optional)
+
+If you want your logs to stay up-to-date automatically, you can set up a scheduled task to copy new logs:
+
+{code:language=powershell}
+# This creates a task that copies logs every 5 minutes
+$taskName = "Dynatrace-MyApp-LogSync"
+$action = New-ScheduledTaskAction -Execute "robocopy" -Argument 'C:\Logs\MyApp C:\Dynatrace\LogShipping\Applications\MyApp /MIR'
+$trigger = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 5) -Once -At (Get-Date)
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -RunLevel Highest
+Start-ScheduledTask -TaskName $taskName
+{code}
+
+h2. Disable Log Shipping
+
+When you no longer need logs in Dynatrace:
+
+{code:language=powershell}
+Remove-Item -Path "C:\Dynatrace\LogShipping\Applications\MyApp" -Recurse -Force
+{code}
+
+That's it. Logs will stop appearing within 5 minutes.
+
+---
+
+h1. What Gets Shipped by Default
+
+These logs are automatically shipped. You don't need to do anything. We've coordinated with the operations team to make sure only essential logs are included.
+
+h2. Linux
+
+||Log Source||Location||Why||
+|System Messages|/var/log/messages (RHEL) or /var/log/syslog (Ubuntu)|OS-level events and errors|
+|Security/Authentication|/var/log/secure (RHEL) or /var/log/auth.log (Ubuntu)|User logins and access control|
+|Audit Trail|/var/log/audit/audit.log|Compliance and security audits|
+|OneAgent|/var/log/dynatrace/oneagent.log|Agent diagnostics and health|
+
+h2. Windows
+
+||Log Source||Event IDs||Why||
+|System Event Log|1, 4, 6, 7, 9, 10, 11, 12, 13, 14, 15, 19|OS-level events and errors|
+|Security Event Log|4624, 4625, 4720, 4722, 4723|User logins and permission changes|
+|Application Event Log|All|Critical application errors|
+
+h2. Kubernetes
+
+||Component||Why||
+|API Server Logs|Kubernetes control plane monitoring|
+|Scheduler Logs|Kubernetes control plane monitoring|
+|Controller Manager Logs|Kubernetes control plane monitoring|
+|Dynatrace Operator Logs|Agent diagnostics and health|
+
+---
+
+h1. Cost Management
+
+h2. How Costs Work
+
+We pay Dynatrace based on how much log data we ingest. Right now, we're paying roughly 2 cents per GB of logs.
+
+h2. Cost Scenarios
+
+|Scenario|Daily Volume|Monthly Cost|
+|Platform logs only (everyone gets this)|20 GB per day|400 EUR|
+|Plus 1 application opted-in|25 GB per day|500 EUR|
+|Plus 5 applications opted-in|35 GB per day|700 EUR|
+
+So if you opt-in one application with moderate logging, expect to add about 100 EUR per month to our Dynatrace bill.
+
+h2. Ways to Keep Costs Down
+
+If you need to ship logs but want to minimize costs, try these approaches:
+
+*Only ship error logs*
+Instead of shipping all logs, only ship ERROR and WARNING level logs. This cuts volume by 50-80%.
+
+{code:language=yaml}
+# For AKS
+dynatrace.com/log-level: "WARN,ERROR"
+{code}
+
+*Sample your logs*
+Ship only 50% or 25% of your logs. Useful for high-volume applications.
+
+{code:language=yaml}
+# For AKS - only ship 50% of logs
+dynatrace.com/log-sampling: "50"
+{code}
+
+*Review quarterly*
+Every 3 months, look at which applications have logs being shipped. Turn off any that you're no longer actively using.
+
+---
+
+h1. Troubleshooting
+
+h2. My logs aren't showing up in Dynatrace
+
+First, wait 5 minutes after enabling. Logs don't appear instantly.
+
+*For AKS*
+
+Check that the annotation was applied correctly:
+
+{code:language=bash}
+kubectl get pod YOUR_POD_NAME -o jsonpath='{.metadata.annotations.dynatrace\.com/log-shipping}'
+{code}
+
+You should see "true". If you see nothing or "false", the annotation wasn't applied properly.
+
+Check that OneAgent is running:
+
+{code:language=bash}
+kubectl get pods -n dynatrace | grep oneagent
+{code}
+
+You should see one oneagent pod per node.
+
+*For Linux VMs*
+
+Check that the symlink exists and works:
+
+{code:language=bash}
+ls -la /opt/dynatrace/logshipping/applications/my-app/
+{code}
+
+You should see symlinks to your log files.
+
+Check that OneAgent is running:
+
+{code:language=bash}
+systemctl status dynatrace-oneagent
+{code}
+
+*For Windows VMs*
+
+Check that the files exist:
+
+{code:language=powershell}
+Get-ChildItem "C:\Dynatrace\LogShipping\Applications\MyApp\"
+{code}
+
+You should see your log files.
+
+Check that OneAgent is running:
+
+{code:language=powershell}
+Get-Service "Dynatrace OneAgent"
+{code}
+
+*If still not working*
+
+1. Make sure your log files actually have content
+2. Make sure OneAgent can read the log files (check file permissions)
+3. Check the OneAgent logs for errors
+4. Contact the platform team (see Support section below)
+
+h2. I'm getting too many logs / costs are too high
+
+*Reduce to error logs only*
+
+Ship only ERROR and CRITICAL level logs instead of all logs.
+
+*Enable sampling*
+
+Ship only a percentage of your logs. For example, ship 25% instead of 100%.
+
+*Disable for now*
+
+If you don't need the logs right now, disable them and turn them back on later when needed.
+
+h2. Permission denied error
+
+*For Linux*
+
+{code:language=bash}
+sudo chown dynatrace:dynatrace /opt/dynatrace/logshipping/applications/my-app
+sudo chmod 755 /opt/dynatrace/logshipping/applications/my-app
+{code}
+
+*For Windows*
+
+{code:language=powershell}
+$acl = Get-Acl "C:\Dynatrace\LogShipping\Applications\MyApp"
+$rule = New-Object System.Security.AccessControl.FileSystemAccessRule("NT SERVICE\Dynatrace OneAgent","Read","ContainerInherit,ObjectInherit","None","Allow")
+$acl.AddAccessRule($rule)
+Set-Acl -Path "C:\Dynatrace\LogShipping\Applications\MyApp" -AclObject $acl
+{code}
+
+---
+
+h1. Common Questions
+
+h2. How long does it take for logs to appear after I enable?
+
+Usually 5 minutes. If it takes longer, check the troubleshooting section.
+
+h2. Can I change which logs get shipped without restarting my application?
+
+Yes. On VMs, you can create or remove symlinks anytime. On AKS, you need to redeploy your pod with updated annotations. The redeploy uses rolling updates, so there's no downtime.
+
+h2. What if my logs contain sensitive data?
+
+Use the log level filter to exclude debug logs, or use the exclude patterns to filter out specific lines. If you have concerns, contact the security team.
+
+h2. Can I use this on non-production environments?
+
+Yes, the same approach works for dev and test environments.
+
+h2. Can I see my cost impact?
+
+Yes, go to the Dynatrace cost dashboard. You can see exactly how much log data your applications are ingesting.
+
+h2. What if I don't want any of my logs in Dynatrace?
+
+That's fine. Don't add the annotation or symlink. Only platform logs will be shipped.
+
+h2. Who do I contact if I have problems?
+
+Reach out to the platform team. You can find us on Slack at #platform-ops or email platform-ops@example.com.
+
+---
+
+h1. Support and Contact
+
+h2. Need Help?
+
+Slack Channel: #platform-ops
+Email: platform-ops@example.com
+This Wiki: [Link to this page]
+
+h2. Timeline
+
+The following is when this feature was rolled out:
+
+- Week 1: Operations team and platform team met to define what logs should be shipped by default
+- Week 2-3: Development team deployed the configuration to our internal test environment
+- Week 3-4: Testing and validation
+- Sprint 4 End: Production deployment to all clusters and VMs
